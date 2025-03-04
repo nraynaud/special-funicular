@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Camera correction</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+          crossorigin="anonymous">
+    <style>
+        .col {
+            background-color: rgba(86, 61, 124, .15);
+            border: 1px solid rgba(86, 61, 124, .2);
+        }
+
+        .row {
+            border: 1px solid rgba(86, 61, 124, .2);;
+        }
+
+        .main-wrapper {
+            height: 100vh;
+        }
+
+        .gutter {
+            background-color: #eee;
+            background-repeat: no-repeat;
+            background-position: 50%;
+        }
+
+        .gutter.gutter-horizontal {
+            cursor: col-resize;
+            background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAeCAYAAADkftS9AAAAIklEQVQoU2M4c+bMfxAGAgYYmwGrIIiDjrELjpo5aiZeMwF+yNnOs5KSvgAAAABJRU5ErkJggg==');
+        }
+
+        #image svg {
+            flex-grow: 1;
+        }
+    </style>
+</head>
+<body>
+<div class="container-fluid main-wrapper d-flex">
+    <div class="row flex-row flex-fill flex-grow-1">
+        <div id="left" class="col">
+            One of 2 columns<br>
+        </div>
+        <div id="image" class="col d-flex">
+            <svg id="SvgjsSvg1001" xmlns="http://www.w3.org/2000/svg"
+            >
+                <defs id="SvgjsDefs1002">
+                    <pattern id="computingFill" x="0" y="0" width="6" height="6" patternUnits="userSpaceOnUse">
+                        <g id="SvgjsG1013">
+                            <rect id="SvgjsRect1014" width="6" height="6" x="0" y="0"></rect>
+                            <line id="SvgjsLine1015" x1="-1" y1="5" x2="7" y2="13"></line>
+                            <line id="SvgjsLine1016" x1="-1" y1="2" x2="7" y2="10"></line>
+                            <line id="SvgjsLine1017" x1="-1" y1="-1" x2="7" y2="7"></line>
+                            <line id="SvgjsLine1018" x1="-1" y1="-4" x2="7" y2="4"></line>
+                            <line id="SvgjsLine1019" x1="-1" y1="-7" x2="7" y2="1"></line>
+                        </g>
+                    </pattern>
+                    <marker id="SvgjsMarker1023" refX="3" refY="1.5" markerWidth="3" markerHeight="3" orient="auto"
+                            viewBox="-5 -5 10 10">
+                        <g id="SvgjsG1024">
+                            <path id="SvgjsPath1025" d="M3 1.5L0 3L0 0Z " fill="#ff0000"></path>
+                        </g>
+                    </marker>
+                    <marker id="SvgjsMarker1026" refX="3" refY="1.5" markerWidth="3" markerHeight="3" orient="auto"
+                            viewBox="-5 -5 10 10">
+                        <g id="SvgjsG1027">
+                            <path id="SvgjsPath1028" d="M3 1.5L0 3L0 0Z " fill="#00ff00"></path>
+                        </g>
+                    </marker>
+                </defs>
+
+                <image id="svgImage" href="3916587d9b.png"></image>
+                <g id="SvgjsG1008" class="root" vector-effect="non-scaling-stroke">
+                    <g id="SvgjsG1009" class="background">
+                        <g id="SvgjsG1020" class="origin">
+                            <path id="SvgjsPath1021" d="M0 0L0 10A10 10 90 0 0 10 0ZM0 0L0 -10A10 10 90 0 0 -10 0Z "
+                                  stroke="none" fill="red"></path>
+                            <ellipse id="SvgjsEllipse1022" rx="10" ry="10" cx="0" cy="0" stroke="red"
+                                     fill="none"></ellipse>
+                        </g>
+                        <g id="SvgjsG1032" class="grid">
+
+                        </g>
+                    </g>
+
+                    <g id="SvgjsG1011" class="overlay">
+                        <g id="SvgjsG1029" class="axes">
+                            <line id="SvgjsLine1030" x1="0" y1="0" x2="10" y2="0" stroke="#ff0000" stroke-width="1.5"
+                                  marker-end="url(#SvgjsMarker1023)"></line>
+                            <line id="SvgjsLine1031" x1="0" y1="0" x2="0" y2="10" stroke="#00ff00" stroke-width="1.5"
+                                  marker-end="url(#SvgjsMarker1026)"></line>
+                        </g>
+                        <path id="SvgjsPath3452" d="M0 0L0 10 " fill="none" stroke="#ff00ff" stroke-width="6"
+                              stroke-linecap="round"></path>
+                    </g>
+                </g>
+            </svg>
+        </div>
+    </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.5.0/dist/svg-pan-zoom.min.js"
+        crossorigin="anonymous"></script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/split.js/1.3.5/split.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/twgl.js/6.1.0/twgl-full.js"
+        integrity="sha512-BAAvM1cwSB7MRlVUzQanaaUBJ7xhcOOhQbXeoZXFCppNYFqaho2RQLbkACAXQvICUb+m3XdrIPFS6GbeiEp86g=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+<script id="shader-to-cielab" type="x-shader/x-fragment">
+    precision mediump float;
+    uniform sampler2D u_image;
+    varying vec2 v_texCoord;
+    vec3 srgb2xyz(vec3 rgb) {
+        //https://www.easyrgb.com/en/math.php
+        vec3 threshold = vec3(0.04045);
+        bvec3 gt = greaterThan(rgb, threshold);
+        bvec3 complement = not(gt);
+        vec3 gtPart = vec3(gt)*pow((rgb+0.55)/1.055, vec3(2.4));
+        vec3 compPart = vec3(complement) * rgb/12.92;
+        vec3 assembly = gtPart+compPart;
+        vec3 percent = assembly*100.0;
+        mat3 toxyz = mat3(
+        vec3(0.4124, 0.3576, 0.1805),
+        vec3(0.2126, 0.7152, 0.0722),
+        vec3(0.0193, 0.1192, 0.9505)
+        );
+        return toxyz * percent;
+    }
+    vec3 argb2xyz(vec3 rgb) {
+        //https://www.easyrgb.com/en/math.php
+        // adobeRGB -> XYZ
+        vec3 percent = 100.0*pow(rgb, vec3(2.19921875));
+        mat3 toxyz = mat3(
+        vec3(0.57667, 0.18555, 0.18819),
+        vec3(0.29738, 0.62735, 0.07527),
+        vec3(0.02703, 0.07069, 0.99110)
+        );
+        return toxyz * percent;
+    }
+    vec3 xyz2lab(vec3 xyz) {
+        // https://www.easyrgb.com/en/math.php
+        // D65 2°
+        vec3 ref = vec3(95.047, 100.000, 108.883);
+        vec3 relative = xyz/ref;
+        vec3 threshold = vec3(0.008856);
+        bvec3 gt = greaterThan(relative, threshold);
+        bvec3 complement = not(gt);
+        vec3 gtPart = vec3(gt)*pow(xyz, vec3(1.0/3.0));
+        vec3 compPart = vec3(complement) * xyz*7.787 + 16.0/116.0;
+        vec3 assembly = gtPart+compPart;
+        return vec3(116.0*assembly.y-16.0, 500.0*(assembly.x-assembly.y), 200.0*(assembly.y-assembly.z));
+    }
+    void main() {
+        gl_FragColor = vec4(xyz2lab(srgb2xyz(texture2D(u_image, v_texCoord).rgb)), 1.0);
+    }
+</script>
+<script>
+  let px_ratio = window.devicePixelRatio || window.screen.availWidth / document.documentElement.clientWidth
+
+  /**
+   *
+   * @param kernelDiameter pixel diameter, including the center element.
+   * @returns {string} the shader for a single pass of the separable kernel
+   */
+  function generate1DShader (kernelDiameter) {
+    console.assert(kernelDiameter % 2 === 1, `kernelDiameter should be odd, was ${kernelDiameter}`)
+    // language=GLSL
+    return `
+        precision mediump float;
+        const int kernelDiameter = ${kernelDiameter};
+        uniform sampler2D u_image;
+        uniform float u_1DKernel[kernelDiameter];
+        uniform vec2 u_neighborDir;
+        varying vec2 v_texCoord;
+        void main() {
+            vec3 result = vec3(0.0);
+            float center = floor(kernelDiameter/2.0);
+            for (float i = float(-kernelRadius+1); i < float(kernelRadius); i++) {
+                result+=u_radialKernel[int(abs(i))] * texture2D(u_image, v_texCoord + u_neighborDir * i).rgb;
+            }
+            gl_FragColor = vec4(result, 1.0);
+        }
+    `
+  }
+
+  addEventListener('resize', () => {
+    const newPx_ratio = window.devicePixelRatio || window.screen.availWidth / document.documentElement.clientWidth
+    if (newPx_ratio !== px_ratio) {
+      px_ratio = newPx_ratio
+      console.log('zooming')
+      return true
+    } else {
+      console.log('just resizing')
+      return false
+    }
+  })
+  const svgZoom = svgPanZoom('#SvgjsSvg1001', {
+    minZoom: 0.001,
+    maxZoom: 100
+  })
+  const target = document.getElementById('image')
+  target.addEventListener('dragover', (event) => {
+    // prevent default to allow drop
+    event.preventDefault()
+  })
+
+  let svgImage = document.getElementById('svgImage')
+
+  async function svgImageLoaded(url) {
+    const worker = new Worker('worker.js', { type: 'module' });
+    worker.onmessage = async (e) => {
+      const { type, result } = e.data;
+      if (type === 'processed') {
+        svgImage.setAttribute('href', result);
+      }
+    };
+    console.log('bitmap', url)
+    worker.postMessage({
+      imageUrl: url,
+    });
+  }
+
+  svgImageLoaded(svgImage.getAttribute('href'))
+  target.addEventListener('drop', async (event) => {
+    event.preventDefault()
+    console.log('drop', {
+      files: [...event.dataTransfer.files],
+      items: [...event.dataTransfer.items],
+      i0: {kind: event.dataTransfer.items[0].kind, type: event.dataTransfer.items[0].type}
+    })
+    const url = URL.createObjectURL(event.dataTransfer.files[0])
+    try {
+      svgImage.setAttribute('href', url)
+      await new Promise((resolve, _reject) => {
+        svgImage.addEventListener('load', async (_e) => {
+          resolve()
+        }, {once: true})
+      })
+      svgZoom.updateBBox();
+      svgZoom.center();
+      svgZoom.fit();
+      await svgImageLoaded(url)
+    }finally{
+        //URL.revokeObjectURL(url)
+    }
+  })
+  Split(['#left', '#image'], {
+    sizes: [10, 80],
+    minSize: [200, 100],
+    expandToMin: true,
+    elementStyle: function (dimension, size, gutterSize) {
+      return {
+        'flex-basis': 'calc(' + size + '% - ' + gutterSize + 'px)',
+      }
+    },
+    gutterStyle: function (dimension, gutterSize) {
+      return {
+        'flex-basis': gutterSize + 'px',
+      }
+    },
+  })
+</script>
+</body>
+</html>
