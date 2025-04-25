@@ -210,11 +210,14 @@
   let svgImage = document.getElementById('svgImage')
 
   async function svgImageLoaded(url) {
-    const worker = new Worker('worker.js', { type: 'module' });
+    const worker = new Worker('worker_webgpu.js', { type: 'module' });
     worker.onmessage = async (e) => {
-      const { type, result } = e.data;
+      const { type, result, message } = e.data;
       if (type === 'processed') {
         svgImage.setAttribute('href', result);
+      } else if (type === 'error') {
+        console.error(`WebGPU worker error: ${message}`);
+        alert(`Error processing image: ${message}`);
       }
     };
     console.log('bitmap', url)
