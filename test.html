@@ -132,8 +132,6 @@
 
 <div>
     <button id="runTest">Run Test with Default Image</button>
-    <button id="runSingleFeatureTest">Run Single Feature Test</button>
-    <button id="runShaderTests">Run Shader Unit Tests</button>
     <input type="file" id="imageInput" accept="image/*">
 </div>
 
@@ -144,7 +142,6 @@
         <li><code>#default</code> - Run the default image test</li>
         <li><code>#singleFeature</code> - Run the single feature test</li>
         <li><code>#shaderTests</code> - Run all shader unit tests</li>
-        <li><code>#webgpu</code> - Test WebGPU in main thread</li>
         <li><code>#siftShaders</code> - Test SIFT shaders</li>
     </ul>
     <p>You can also run individual shader tests by using the following hash format:</p>
@@ -185,7 +182,17 @@
 <!-- No need to load shader code and tests as ES modules here anymore.
      Each function that needs them will import them directly. -->
 
-<script>
+<script type="module">
+  // Import all modules at the top level
+
+  import {
+    runShaderTests,
+    testGaussianBlurShader,
+    testDogShader,
+    testKeypointDetectionShader,
+    testVisualizeKeypointsShader
+  } from './shader_tests.js'
+
   // Script to run the WebGPU SIFT tests
   // This script will be included in test.html to automatically run the tests
 
@@ -202,6 +209,142 @@
     modal.style.display = 'none'
   }
 
+  // Function to display test results in a table
+  function displayTestResultsTable (testResults) {
+    console.log('Displaying test results table...')
+    const container = document.createElement('div')
+    container.className = 'testResultsContainer'
+    const table = document.createElement('table')
+    table.id = 'testResultsTable'
+
+    const thead = document.createElement('thead')
+    const headerRow = document.createElement('tr')
+
+    const headers = ['Test Type', 'Test Name', 'Status', 'Message', 'Input Image', 'Output Image']
+    headers.forEach(headerText => {
+      const th = document.createElement('th')
+      th.textContent = headerText
+      headerRow.appendChild(th)
+    })
+
+    thead.appendChild(headerRow)
+    table.appendChild(thead)
+
+    // Create table body
+    const tbody = document.createElement('tbody')
+
+    // Add rows for each test result
+    testResults.forEach(result => {
+      const row = document.createElement('tr')
+
+      // Test Type
+      const typeCell = document.createElement('td')
+      typeCell.textContent = result.type
+      row.appendChild(typeCell)
+
+      // Test Name
+      const nameCell = document.createElement('td')
+
+      // If it's a shader test, add a link to run it individually
+      if (result.type === 'Shader Unit Test') {
+        const nameLink = document.createElement('a')
+        nameLink.textContent = result.name
+        nameLink.href = result.hash || `#shader-${result.name}` // Use the hash property if available
+        nameLink.title = `Run ${result.name} test individually`
+        nameCell.appendChild(nameLink)
+      } else {
+        nameCell.textContent = result.name
+      }
+
+      row.appendChild(nameCell)
+
+      // Status
+      const statusCell = document.createElement('td')
+      statusCell.textContent = result.passed ? 'PASS' : 'FAIL'
+      statusCell.className = result.passed ? 'pass' : 'fail'
+      row.appendChild(statusCell)
+
+      // Message
+      const messageCell = document.createElement('td')
+      messageCell.textContent = result.message || (result.error || '')
+      row.appendChild(messageCell)
+
+      // Input Image
+      const inputImageCell = document.createElement('td')
+      if (result.inputImage) {
+        if (result.inputImage instanceof ImageData) {
+          const canvasElement = document.createElement('canvas')
+          canvasElement.width = result.inputImage.width
+          canvasElement.height = result.inputImage.height
+          const ctx = canvasElement.getContext("2d");
+          ctx.putImageData(result.inputImage, 0, 0);
+          canvasElement.remove()
+          const url = canvasElement.toDataURL()
+          const inputImg = document.createElement('img')
+          inputImg.src = url
+          inputImg.style.maxWidth = '100px'
+          inputImg.style.maxHeight = '100px'
+          inputImg.className = 'clickable-image'
+          inputImg.title = 'Click to enlarge'
+          inputImg.onclick = function () { showImageModal(this.src) }
+          inputImageCell.appendChild(inputImg)
+        }
+      }
+      row.appendChild(inputImageCell)
+
+      // Output Image
+      const outputImageCell = document.createElement('td')
+      if (result.outputImage instanceof ImageData) {
+        const canvasElement = document.createElement('canvas')
+        canvasElement.width = result.outputImage.width
+        canvasElement.height = result.outputImage.height
+        const ctx = canvasElement.getContext("2d");
+        ctx.putImageData(result.outputImage, 0, 0);
+        canvasElement.remove()
+        const url = canvasElement.toDataURL()
+        const outputImg = document.createElement('img')
+        outputImg.src = url
+        outputImg.style.maxWidth = '100px'
+        outputImg.style.maxHeight = '100px'
+        outputImg.className = 'clickable-image'
+        outputImg.title = 'Click to enlarge'
+        outputImg.onclick = function () { showImageModal(this.src) }
+        outputImageCell.appendChild(outputImg)
+      }
+      row.appendChild(outputImageCell)
+
+      tbody.appendChild(row)
+    })
+
+    table.appendChild(tbody)
+    container.appendChild(table)
+
+    // Add a heading
+    const heading = document.createElement('h2')
+    heading.textContent = 'Test Results'
+
+    // Add summary
+    const passCount = testResults.filter(r => r.passed).length
+    const failCount = testResults.length - passCount
+
+    const summary = document.createElement('p')
+    summary.innerHTML = `Total: <strong>${testResults.length}</strong> |
+                                 Passed: <span class="pass">${passCount}</span> |
+                                 Failed: <span class="fail">${failCount}</span>`
+
+    // Add to document
+    const resultsSection = document.createElement('div')
+    resultsSection.id = 'testResultsSection'
+    resultsSection.appendChild(heading)
+    resultsSection.appendChild(summary)
+    resultsSection.appendChild(container)
+
+    // Add to body
+    document.body.appendChild(resultsSection)
+
+    return resultsSection
+  }
+
   // Set up modal close button
   document.addEventListener('DOMContentLoaded', function () {
     const closeBtn = document.querySelector('.close-modal')
@@ -214,7 +357,6 @@
         closeImageModal()
       }
     })
-
   })
 
   // Function to save test results to localStorage and send to server
@@ -314,23 +456,17 @@
   }
 
   // Wait for the page to load
-  window.addEventListener('load', function () {
+  window.addEventListener('load', async function () {
     console.log('Test runner script loaded, running tests...')
 
     // Function to run tests
-    function runTests () {
+    async function runTests () {
       console.log('Running tests automatically...')
 
       // Function to run an individual shader test
       async function runIndividualShaderTest (testName, hash) {
         try {
-          // Import the individual test functions
-          const {
-            testGaussianBlurShader,
-            testDogShader,
-            testKeypointDetectionShader,
-            testVisualizeKeypointsShader
-          } = await import('./shader_tests.js')
+          // Use the test functions imported at the top level
           const HASH_TEST = {
             '#shader-gaussianBlur': testGaussianBlurShader,
             '#shader-dog': testDogShader,
@@ -363,40 +499,15 @@
             throw new Error(`Unknown shader test: ${testName}`)
           }
 
-          // Display the test results
-          const testResultsSection = displayTestResultsTable(results.tests)
-
-          // Add a close button
-          const closeButton = document.createElement('button')
-          closeButton.textContent = 'Close Results'
-          closeButton.style.marginTop = '10px'
-          closeButton.onclick = () => {
-            document.body.removeChild(testResultsSection)
-          }
-          testResultsSection.appendChild(closeButton)
+          // Display the test results with a close button
+          displayTestResultsWithCloseButton(results.tests)
 
         } catch (error) {
           console.error(`Error running shader test ${testName}:`, error)
 
           // Display error in a table
-          const errorResult = [{
-            type: 'Shader Unit Test',
-            name: testName,
-            passed: false,
-            error: error.message,
-            hash: `#shader-${testName}`
-          }]
-
-          const testResultsSection = displayTestResultsTable(errorResult)
-
-          // Add a close button
-          const closeButton = document.createElement('button')
-          closeButton.textContent = 'Close Results'
-          closeButton.style.marginTop = '10px'
-          closeButton.onclick = () => {
-            document.body.removeChild(testResultsSection)
-          }
-          testResultsSection.appendChild(closeButton)
+          const errorResult = createErrorResult('Shader Unit Test', testName, error.message, `#shader-${testName}`)
+          displayTestResultsWithCloseButton(errorResult)
         }
       }
 
@@ -405,36 +516,23 @@
       const hash = rawHash.substring(1)
       if (hash) {
         console.log(`Running specific test from URL hash: ${hash}`)
-
         if (hash === 'default' && document.getElementById('runTest')) {
           // Run the default image test
           console.log('Running test with default image...')
           document.getElementById('runTest').click()
           setTimeout(collectTestResults, 5000)
-        } else if (hash === 'singleFeature' && document.getElementById('runSingleFeatureTest')) {
-          // Run the single feature test
-          console.log('Running single feature test...')
-          document.getElementById('runSingleFeatureTest').click()
+        } else if (hash === 'singleFeature') {
+          await runSingleFeatureTest()
         } else if (hash === 'shaderTests') {
-          // Run shader unit tests
-          console.log('Running shader unit tests...')
-          document.getElementById('runShaderTests').click()
+          await runShaderTests()
         } else if (hash.startsWith('shader-')) {
           // Run individual shader test
           const testName = hash.substring(7) // Remove 'shader-' prefix
           console.log(`Running individual shader test: ${testName}`)
-          runIndividualShaderTest(testName, rawHash)
-        } else if (hash === 'webgpu' && typeof testWebGPUDirectly === 'function') {
-          // Run WebGPU test directly
-          console.log('Testing WebGPU in main thread...')
-          testWebGPUDirectly()
-        } else if (hash === 'siftShaders' && typeof testSIFTShaders === 'function') {
-          // Test SIFT shaders
-          console.log('Testing SIFT shaders...')
-          testSIFTShaders()
+          await runIndividualShaderTest(testName, rawHash)
         } else {
           console.error(`Unknown test specified in URL hash: ${hash}`)
-          console.log('Available tests: default, singleFeature, shaderTests, shader-[testName], webgpu, siftShaders')
+          console.log('Available tests: default, singleFeature, shaderTests, shader-[testName], siftShaders')
           console.log('Available shader tests: gaussianBlur, dog, keypointDetection, visualizeKeypoints')
         }
       } else {
@@ -442,7 +540,7 @@
         // Check if the runAllTests function exists
         if (typeof runAllTests === 'function') {
           console.log('Running all tests...')
-          runAllTests()
+          await runAllTests()
           // Note: collectTestResults is now called directly from runAllTests when tests complete
         } else if (document.getElementById('runTest')) {
           // Fall back to clicking the "Run Test with Default Image" button
@@ -458,17 +556,81 @@
       }
     }
 
-    // Run tests immediately
-    runTests()
-
     // Add event listener for hash changes to re-run tests when hash changes
     window.addEventListener('hashchange', function () {
       console.log('URL hash changed, re-running tests...')
       runTests()
     })
+    await runTests()
   })
-</script>
-<script>
+  // Utility functions to reduce code duplication
+
+  // Function to create a button with consistent styling
+  function createButton (text, onClick, options = {}) {
+    const button = document.createElement('button')
+    button.textContent = text
+    button.onclick = onClick
+
+    // Apply optional styles
+    if (options.marginTop) button.style.marginTop = options.marginTop
+    if (options.marginLeft) button.style.marginLeft = options.marginLeft
+    if (options.backgroundColor) button.style.backgroundColor = options.backgroundColor
+
+    return button
+  }
+
+  // Function to create a close button with consistent styling
+  function createCloseButton (text, onClick) {
+    return createButton(text || 'Close Results', onClick, {marginTop: '10px'})
+  }
+
+  // Function to display test results and add a close button
+  function displayTestResultsWithCloseButton (testResults) {
+    const testResultsSection = displayTestResultsTable(testResults)
+
+    // Add a close button
+    const closeButton = createCloseButton('Close Results', () => {
+      document.body.removeChild(testResultsSection)
+    })
+    testResultsSection.appendChild(closeButton)
+
+    return testResultsSection
+  }
+
+  // Function to create an error result object
+  function createErrorResult (type, name, errorMessage, hash) {
+    return [{
+      type: type || 'Test Error',
+      name: name || 'Unknown Test',
+      passed: false,
+      error: errorMessage,
+      hash: hash
+    }]
+  }
+
+  // Function to test a shader
+  async function testShader (device, code, name) {
+    console.log(`Testing ${name} Shader...`)
+    try {
+      const shaderModule = device.createShaderModule({
+        label: `${name} Shader Test`,
+        code: code
+      })
+      const compilationInfo = await shaderModule.getCompilationInfo()
+      for (const message of compilationInfo.messages) {
+        if (message.type in ['error', 'warning']) {
+          const formattedMessage = `Line ${message.lineNum}:${message.linePos} - ${code.substr(message.offset, message.length)}\n` + message.message
+          throw new Error(formattedMessage)
+        }
+      }
+      console.log(`${name} Shader compiled successfully`)
+    } catch (error) {
+      const errorMessage = `${name} Shader error: ${error.message}`
+      console.error(errorMessage)
+      sendErrorToAI(errorMessage)
+    }
+  }
+
   // Override console.log to also display in our log div
   const originalConsoleLog = console.log
   const originalConsoleError = console.error
@@ -484,22 +646,6 @@
 
     logDiv.innerHTML += `<div>[LOG] ${message}</div>`
     logDiv.scrollTop = logDiv.scrollHeight
-  }
-
-  console.error = function () {
-    const args = Array.from(arguments)
-    originalConsoleError.apply(console, args)
-
-    const logDiv = document.getElementById('log')
-    const message = args.map(arg =>
-      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg
-    ).join(' ')
-
-    logDiv.innerHTML += `<div style="color: red">[ERROR] ${message}</div>`
-    logDiv.scrollTop = logDiv.scrollHeight
-
-    // Send error to a logging service that the AI can access
-    sendErrorToAI(message)
   }
 
   // Function to send errors to the AI
@@ -544,6 +690,22 @@
     }
 
     document.body.appendChild(aiDataElement)
+  }
+
+  console.error = function () {
+    const args = Array.from(arguments)
+    originalConsoleError.apply(console, args)
+
+    const logDiv = document.getElementById('log')
+    const message = args.map(arg =>
+      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg
+    ).join(' ')
+
+    logDiv.innerHTML += `<div style="color: red">[ERROR] ${message}</div>`
+    logDiv.scrollTop = logDiv.scrollHeight
+
+    // Send error to a logging service that the AI can access
+    sendErrorToAI(message)
   }
 
   // Centralized worker message handler
@@ -664,61 +826,6 @@
     }
   })
 
-  // Add event listener for the shader tests button
-  document.getElementById('runShaderTests').addEventListener('click', async () => {
-    console.log('Running shader unit tests...')
-    try {
-      // Import the runShaderTests function
-      const {runShaderTests} = await import('./shader_tests.js')
-      const results = await runShaderTests()
-      console.log(`Shader tests completed: ${results.passed} passed, ${results.failed} failed`)
-
-      // Convert shader test results to the format expected by displayTestResultsTable
-      const testResults = results.tests.map(test => ({
-        type: 'Shader Unit Test',
-        name: test.name,
-        passed: test.passed,
-        message: test.passed ? test.message : '',
-        error: test.passed ? '' : (test.error || test.message)
-      }))
-
-      // Display the test results table
-      const testResultsSection = displayTestResultsTable(testResults)
-
-      // Add a close button
-      const closeButton = document.createElement('button')
-      closeButton.textContent = 'Close Results'
-      closeButton.style.marginTop = '10px'
-      closeButton.onclick = () => {
-        document.body.removeChild(testResultsSection)
-      }
-      testResultsSection.appendChild(closeButton)
-
-    } catch (error) {
-      console.error('Error running shader tests:', error)
-
-      // Display error in a table
-      const errorResult = [{
-        type: 'Shader Unit Test',
-        name: 'Test Execution',
-        passed: false,
-        error: error.message,
-        hash: '#shader-Test Execution'
-      }]
-
-      const testResultsSection = displayTestResultsTable(errorResult)
-
-      // Add a close button
-      const closeButton = document.createElement('button')
-      closeButton.textContent = 'Close Results'
-      closeButton.style.marginTop = '10px'
-      closeButton.onclick = () => {
-        document.body.removeChild(testResultsSection)
-      }
-      testResultsSection.appendChild(closeButton)
-    }
-  })
-
   // Function to create a simple test image with a single feature
   function createSingleFeatureTestImage () {
     console.log('Creating single feature test image')
@@ -734,22 +841,23 @@
     // Draw a single feature (a black dot) at position (50, 50)
     // Use a smaller radius and create a high-contrast pattern
     ctx.fillStyle = 'black'
-    ctx.beginPath()
-    ctx.arc(50, 50, 10, 0, Math.PI * 2)
+
+    function drawCircle (radius) {
+      ctx.beginPath()
+      ctx.arc(50, 50, radius, 0, Math.PI * 2)
+    }
+
+    drawCircle(10)
     ctx.fill()
 
-    // Add a white ring around the black dot to create more contrast
     ctx.strokeStyle = 'white'
     ctx.lineWidth = 2
-    ctx.beginPath()
-    ctx.arc(50, 50, 12, 0, Math.PI * 2)
+    drawCircle(12)
     ctx.stroke()
 
-    // Add a black ring around the white ring for even more contrast
     ctx.strokeStyle = 'black'
     ctx.lineWidth = 2
-    ctx.beginPath()
-    ctx.arc(50, 50, 15, 0, Math.PI * 2)
+    drawCircle(15)
     ctx.stroke()
 
     return canvas.toDataURL('image/png')
@@ -802,133 +910,8 @@
     console.log('Message sent to worker')
   }
 
-  // Add event listener for the single feature test button
-  document.getElementById('runSingleFeatureTest').addEventListener('click', runSingleFeatureTest)
-
-  // Function to display test results in a table
-  function displayTestResultsTable (testResults) {
-    console.log('Displaying test results table...')
-
-    // Create container for the table
-    const container = document.createElement('div')
-    container.className = 'testResultsContainer'
-
-    // Create table
-    const table = document.createElement('table')
-    table.id = 'testResultsTable'
-
-    // Create table header
-    const thead = document.createElement('thead')
-    const headerRow = document.createElement('tr')
-
-    const headers = ['Test Type', 'Test Name', 'Status', 'Message', 'Input Image', 'Output Image']
-    headers.forEach(headerText => {
-      const th = document.createElement('th')
-      th.textContent = headerText
-      headerRow.appendChild(th)
-    })
-
-    thead.appendChild(headerRow)
-    table.appendChild(thead)
-
-    // Create table body
-    const tbody = document.createElement('tbody')
-
-    // Add rows for each test result
-    testResults.forEach(result => {
-      const row = document.createElement('tr')
-
-      // Test Type
-      const typeCell = document.createElement('td')
-      typeCell.textContent = result.type
-      row.appendChild(typeCell)
-
-      // Test Name
-      const nameCell = document.createElement('td')
-
-      // If it's a shader test, add a link to run it individually
-      if (result.type === 'Shader Unit Test') {
-        const nameLink = document.createElement('a')
-        nameLink.textContent = result.name
-        nameLink.href = result.hash || `#shader-${result.name}` // Use the hash property if available
-        nameLink.title = `Run ${result.name} test individually`
-        nameCell.appendChild(nameLink)
-      } else {
-        nameCell.textContent = result.name
-      }
-
-      row.appendChild(nameCell)
-
-      // Status
-      const statusCell = document.createElement('td')
-      statusCell.textContent = result.passed ? 'PASS' : 'FAIL'
-      statusCell.className = result.passed ? 'pass' : 'fail'
-      row.appendChild(statusCell)
-
-      // Message
-      const messageCell = document.createElement('td')
-      messageCell.textContent = result.message || (result.error || '')
-      row.appendChild(messageCell)
-
-      // Input Image
-      const inputImageCell = document.createElement('td')
-      if (document.getElementById('originalImage').src) {
-        const inputImg = document.createElement('img')
-        inputImg.src = document.getElementById('originalImage').src
-        inputImg.style.maxWidth = '100px'
-        inputImg.style.maxHeight = '100px'
-        inputImg.className = 'clickable-image'
-        inputImg.title = 'Click to enlarge'
-        inputImg.onclick = function () { showImageModal(this.src) }
-        inputImageCell.appendChild(inputImg)
-      }
-      row.appendChild(inputImageCell)
-
-      // Output Image
-      const outputImageCell = document.createElement('td')
-      if (document.getElementById('processedImage').src) {
-        const outputImg = document.createElement('img')
-        outputImg.src = document.getElementById('processedImage').src
-        outputImg.style.maxWidth = '100px'
-        outputImg.style.maxHeight = '100px'
-        outputImg.className = 'clickable-image'
-        outputImg.title = 'Click to enlarge'
-        outputImg.onclick = function () { showImageModal(this.src) }
-        outputImageCell.appendChild(outputImg)
-      }
-      row.appendChild(outputImageCell)
-
-      tbody.appendChild(row)
-    })
-
-    table.appendChild(tbody)
-    container.appendChild(table)
-
-    // Add a heading
-    const heading = document.createElement('h2')
-    heading.textContent = 'Test Results'
-
-    // Add summary
-    const passCount = testResults.filter(r => r.passed).length
-    const failCount = testResults.length - passCount
-
-    const summary = document.createElement('p')
-    summary.innerHTML = `Total: <strong>${testResults.length}</strong> |
-                                 Passed: <span class="pass">${passCount}</span> |
-                                 Failed: <span class="fail">${failCount}</span>`
-
-    // Add to document
-    const resultsSection = document.createElement('div')
-    resultsSection.id = 'testResultsSection'
-    resultsSection.appendChild(heading)
-    resultsSection.appendChild(summary)
-    resultsSection.appendChild(container)
-
-    // Add to body
-    document.body.appendChild(resultsSection)
-
-    return resultsSection
-  }
+  // This function has been merged with the identical one at line 206
+  // See the first displayTestResultsTable function above
 
   // Function to run all tests and collect all errors
   async function runAllTests () {
@@ -966,58 +949,12 @@
     document.body.appendChild(reportElement)
 
     try {
-      // Run WebGPU test
-      console.log('Running WebGPU test...')
-      try {
-        await testWebGPUDirectly()
-        // Add successful test result
-        allTestResults.push({
-          type: 'WebGPU',
-          name: 'WebGPU Direct Test',
-          passed: true,
-          message: 'WebGPU initialized successfully'
-        })
-      } catch (error) {
-        allErrors.push(`WebGPU test error: ${error.message}`)
-        allTestResults.push({
-          type: 'WebGPU',
-          name: 'WebGPU Direct Test',
-          passed: false,
-          error: error.message
-        })
-      }
-
-      // Run SIFT shaders test
-      console.log('Running SIFT shaders test...')
-      try {
-        await testSIFTShaders();
-        // Add successful test results for each shader
-        ['Gaussian Blur', 'DoG', 'Keypoint Detection', 'Visualize Keypoints'].forEach(shader => {
-          allTestResults.push({
-            type: 'SIFT Shader',
-            name: `${shader} Shader Compilation`,
-            passed: true,
-            message: 'Shader compiled successfully'
-          })
-        })
-      } catch (error) {
-        allErrors.push(`SIFT shaders test error: ${error.message}`)
-        allTestResults.push({
-          type: 'SIFT Shader',
-          name: 'SIFT Shaders Test',
-          passed: false,
-          error: error.message
-        })
-      }
-
-      // Run worker test with default image
-      console.log('Running worker test with default image...')
       try {
         await new Promise((resolve) => {
           // Override worker message handler to collect errors but still update images
           const originalRunWorkerTest = runWorkerTest
           runWorkerTest = function (imageUrl) {
-            const promise = new Promise((resolveWorker) => {
+            return new Promise((resolveWorker) => {
               // Display the original image
               document.getElementById('originalImage').src = imageUrl
 
@@ -1053,12 +990,9 @@
 
               worker.postMessage({imageUrl})
             })
-
-            return promise
           }
 
           runWorkerTest('3916587d9b.png').then(() => {
-            // Restore original runWorkerTest function
             runWorkerTest = originalRunWorkerTest
             resolve()
           })
@@ -1186,8 +1120,6 @@
       // Run shader unit tests
       console.log('Running shader unit tests...')
       try {
-        // Import the runShaderTests function
-        const {runShaderTests} = await import('./shader_tests.js')
         const results = await runShaderTests()
         console.log(`Shader tests completed: ${results.passed} passed, ${results.failed} failed`)
 
@@ -1226,7 +1158,7 @@
       console.log('All tests completed. Generating report...')
 
       // Display the test results table
-      const testResultsSection = displayTestResultsTable(allTestResults)
+      displayTestResultsTable(allTestResults)
 
       // Display the error report if there are errors
       if (allErrors.length === 0) {
@@ -1244,11 +1176,9 @@
       reportElement.style.display = 'block'
 
       // Add a close button
-      const closeButton = document.createElement('button')
-      closeButton.textContent = 'Close Report'
-      closeButton.onclick = () => {
+      const closeButton = createCloseButton('Close Report', () => {
         reportElement.style.display = 'none'
-      }
+      })
       reportElement.appendChild(closeButton)
 
       // Create a hidden element with the JSON data for the AI
@@ -1295,201 +1225,14 @@
   if (navigator.gpu) {
     console.log('WebGPU is supported in this browser')
 
-    // Add buttons to test WebGPU directly in the main thread
-    const testWebGPUButton = document.createElement('button')
-    testWebGPUButton.textContent = 'Test WebGPU in Main Thread'
-    testWebGPUButton.style.marginLeft = '10px'
-    testWebGPUButton.onclick = testWebGPUDirectly
-    document.querySelector('div').appendChild(testWebGPUButton)
-
-    // Add button to test SIFT shaders directly
-    const testSIFTShadersButton = document.createElement('button')
-    testSIFTShadersButton.textContent = 'Test SIFT Shaders'
-    testSIFTShadersButton.style.marginLeft = '10px'
-    testSIFTShadersButton.onclick = testSIFTShaders
-    document.querySelector('div').appendChild(testSIFTShadersButton)
-
     // Add button to run all tests and collect all errors
-    const runAllTestsButton = document.createElement('button')
-    runAllTestsButton.textContent = 'Run All Tests (AI Debug)'
-    runAllTestsButton.style.marginLeft = '10px'
-    runAllTestsButton.style.backgroundColor = '#ffdddd'
-    runAllTestsButton.onclick = runAllTests
+    const runAllTestsButton = createButton('Run All Tests (AI Debug)', runAllTests, {
+      marginLeft: '10px',
+      backgroundColor: '#ffdddd'
+    })
     document.querySelector('div').appendChild(runAllTestsButton)
   } else {
     console.error('WebGPU is NOT supported in this browser')
-  }
-
-  // Function to test the SIFT shaders directly
-  async function testSIFTShaders () {
-    console.log('Testing SIFT shaders directly...')
-    try {
-      // Import the shader code
-      const {
-        gaussianBlurShader,
-        dogShader,
-        keypointDetectionShader,
-        visualizeKeypointsShader
-      } = await import('./sift-shaders.js')
-
-      // Request adapter and device
-      const adapter = await navigator.gpu.requestAdapter()
-      if (!adapter) {
-        throw new Error('No appropriate GPU adapter found')
-      }
-      console.log('WebGPU adapter obtained:', adapter.name)
-
-      // Request device
-      const device = await adapter.requestDevice({
-        label: 'SIFT Shader Test Device'
-      })
-      console.log('WebGPU device obtained')
-
-      // Set up error handling for the device
-      device.addEventListener('uncapturederror', (event) => {
-        const errorMessage = `WebGPU uncaptured error: ${event.error.message}`
-        console.error(errorMessage)
-        sendErrorToAI(errorMessage)
-      })
-
-      // Test each shader
-      console.log('Testing Gaussian Blur Shader...')
-      try {
-        const gaussianModule = device.createShaderModule({
-          label: 'Gaussian Blur Shader Test',
-          code: gaussianBlurShader
-        })
-        console.log('Gaussian Blur Shader compiled successfully')
-      } catch (error) {
-        const errorMessage = `Gaussian Blur Shader error: ${error.message}`
-        console.error(errorMessage)
-        sendErrorToAI(errorMessage)
-      }
-
-      console.log('Testing DoG Shader...')
-      try {
-        const dogModule = device.createShaderModule({
-          label: 'DoG Shader Test',
-          code: dogShader
-        })
-        console.log('DoG Shader compiled successfully')
-      } catch (error) {
-        const errorMessage = `DoG Shader error: ${error.message}`
-        console.error(errorMessage)
-        sendErrorToAI(errorMessage)
-      }
-
-      console.log('Testing Keypoint Detection Shader...')
-      try {
-        const keypointModule = device.createShaderModule({
-          label: 'Keypoint Detection Shader Test',
-          code: keypointDetectionShader
-        })
-        console.log('Keypoint Detection Shader compiled successfully')
-      } catch (error) {
-        const errorMessage = `Keypoint Detection Shader error: ${error.message}`
-        console.error(errorMessage)
-        sendErrorToAI(errorMessage)
-      }
-
-      console.log('Testing Visualize Keypoints Shader...')
-      try {
-        const visualizeModule = device.createShaderModule({
-          label: 'Visualize Keypoints Shader Test',
-          code: visualizeKeypointsShader
-        })
-        console.log('Visualize Keypoints Shader compiled successfully')
-      } catch (error) {
-        const errorMessage = `Visualize Keypoints Shader error: ${error.message}`
-        console.error(errorMessage)
-        sendErrorToAI(errorMessage)
-      }
-
-      console.log('All SIFT shaders tested')
-    } catch (error) {
-      const errorMessage = `SIFT shader test error: ${error.message}`
-      console.error(errorMessage)
-      sendErrorToAI(errorMessage)
-    }
-  }
-
-  // Function to test WebGPU directly in the main thread
-  async function testWebGPUDirectly () {
-    console.log('Testing WebGPU directly in main thread...')
-    try {
-      // Request adapter
-      const adapter = await navigator.gpu.requestAdapter()
-      if (!adapter) {
-        throw new Error('No appropriate GPU adapter found')
-      }
-      console.log('WebGPU adapter obtained:', adapter.name)
-
-      // Request device
-      const device = await adapter.requestDevice({
-        label: 'Test WebGPU Device'
-      })
-      console.log('WebGPU device obtained')
-
-      // Set up error handling for the device
-      device.addEventListener('uncapturederror', (event) => {
-        const errorMessage = `WebGPU uncaptured error: ${event.error.message}`
-        console.error(errorMessage)
-        sendErrorToAI(errorMessage)
-      })
-
-      // Try to create a simple shader module to test shader compilation
-      try {
-        const shaderModule = device.createShaderModule({
-          label: 'Test Shader',
-          code: `
-                            @vertex
-                            fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> @builtin(position) vec4<f32> {
-                                var pos = array<vec2<f32>, 3>(
-                                    vec2<f32>(0.0, 0.5),
-                                    vec2<f32>(-0.5, -0.5),
-                                    vec2<f32>(0.5, -0.5)
-                                );
-                                return vec4<f32>(pos[vertexIndex], 0.0, 1.0);
-                            }
-
-                            @fragment
-                            fn fragmentMain() -> @location(0) vec4<f32> {
-                                return vec4<f32>(1.0, 0.0, 0.0, 1.0);
-                            }
-                        `
-        })
-        console.log('Shader module created successfully')
-
-        // Create a simple pipeline to test the shader
-        const pipeline = device.createRenderPipeline({
-          label: 'Test Pipeline',
-          layout: 'auto',
-          vertex: {
-            module: shaderModule,
-            entryPoint: 'vertexMain'
-          },
-          fragment: {
-            module: shaderModule,
-            entryPoint: 'fragmentMain',
-            targets: [{format: 'bgra8unorm'}]
-          },
-          primitive: {
-            topology: 'triangle-list'
-          }
-        })
-        console.log('Render pipeline created successfully')
-
-        console.log('WebGPU test completed successfully')
-      } catch (shaderError) {
-        const errorMessage = `Shader compilation error: ${shaderError.message}`
-        console.error(errorMessage)
-        sendErrorToAI(errorMessage)
-      }
-    } catch (error) {
-      const errorMessage = `WebGPU test error: ${error.message}`
-      console.error(errorMessage)
-      sendErrorToAI(errorMessage)
-    }
   }
 </script>
 </body>

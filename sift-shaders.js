@@ -10,11 +10,11 @@ export const CONTRAST_THRESHOLD = 0.001; // Reduced threshold to detect more fea
 export const EDGE_THRESHOLD = 5.0;
 export const MAX_KEYPOINTS = 10000;
 
-// WebGPU shader for Gaussian blur
 export const gaussianBlurShader = `
-@group(0) @binding(0) var inputTexture: texture_2d<f32>;
-@group(0) @binding(1) var outputTexture: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(2) var<uniform> params: GaussianParams;
+@group(0) @binding(0) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(1) var diffuseSampler: sampler;
+@group(0) @binding(2) var inputTexture: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> params: GaussianParams;
 
 struct GaussianParams {
   sigma: f32,
@@ -31,10 +31,9 @@ fn gaussian(x: f32, sigma: f32) -> f32 {
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let imageSize = vec2<i32>(params.imageSize);
+  let imageSize = vec2<i32>(params.imageSize.xy);
   let pixel_pos = vec2<i32>(global_id.xy);
 
-  // Check if within bounds
   if (pixel_pos.x >= imageSize.x || pixel_pos.y >= imageSize.y) {
     return;
   }
@@ -67,7 +66,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       clamp(samplePos.y, 0, imageSize.y - 1)
     );
 
-    let texel = textureLoad(inputTexture, clampedPos, 0);
+    let texel = textureSampleLevel(inputTexture, diffuseSampler, ( vec2<f32>(pixel_pos) + params.direction*f32(i) )/params.imageSize, 0);
     sum += texel * weight;
     weightSum += weight;
   }
@@ -84,7 +83,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   // Ensure the result has full opacity
   result.a = 1.0;
-
   textureStore(outputTexture, pixel_pos, result);
 }
 `;

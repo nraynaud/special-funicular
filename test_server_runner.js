@@ -1,5 +1,15 @@
 // Combined test server and runner
 // This file merges the functionality of test_server.js and run_test.js
+//
+// Usage:
+// node test_server_runner.js [test_hash]
+//
+// Examples:
+// node test_server_runner.js                  - Run all tests
+// node test_server_runner.js default          - Run the default image test
+// node test_server_runner.js singleFeature    - Run the single feature test
+// node test_server_runner.js shaderTests      - Run all shader unit tests
+// node test_server_runner.js shader-gaussianBlur - Run specific shader test
 
 const http = require('http');
 const fs = require('fs');
@@ -12,6 +22,10 @@ const os = require('os');
 const PORT = 3000;
 const SERVER_URL = `http://localhost:${PORT}`;
 const TEST_URL = `${SERVER_URL}/test.html`;
+
+// Parse command line arguments for test hash
+const testHash = process.argv[2] || '';
+const testUrl = testHash ? `${TEST_URL}#${testHash}` : TEST_URL;
 
 // Create a server
 const server = http.createServer((req, res) => {
@@ -104,26 +118,24 @@ const server = http.createServer((req, res) => {
     }
 });
 
-// This function is no longer needed as the browser will send results to /save_results_and_shutdown
-// when tests complete, which will shut down the server automatically
 
 // Start the server
 console.log('Starting server...');
 server.listen(PORT, () => {
     console.log(`Server running at ${SERVER_URL}/`);
-    console.log(`Opening ${TEST_URL} in the default browser...`);
+    console.log(`Opening ${testUrl} in the default browser...`);
 
     // Determine the command to open the browser based on the operating system
     let command;
     switch (os.platform()) {
         case 'darwin': // macOS
-            command = `open -gj "${TEST_URL}" --args  --no-startup-window`;
+            command = `open -gj "${testUrl}" --args  --no-startup-window`;
             break;
         case 'win32': // Windows
-            command = `start "" "${TEST_URL}"`;
+            command = `start "" "${testUrl}"`;
             break;
         default: // Linux and others
-            command = `xdg-open "${TEST_URL}"`;
+            command = `xdg-open "${testUrl}"`;
             break;
     }
 
@@ -146,8 +158,5 @@ server.listen(PORT, () => {
             return;
         }
         console.log(`Browser opened successfully.`);
-
-        // No need to set a timeout to check for test results
-        // The browser will send results to /save_results_and_shutdown when tests complete
     });
 });
