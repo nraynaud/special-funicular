@@ -166,30 +166,6 @@ export async function testGaussianBlurShader (device, results) {
   const workgroupSize = 64
   const kernelRadius = 20
 
-  async function runShader (gaussianPipeline, bindGroup, width, height, outputTexture, outputBuffer, bytesPerRow) {
-    const commandEncoder = device.createCommandEncoder()
-    const computePass = commandEncoder.beginComputePass()
-    computePass.setPipeline(gaussianPipeline)
-    computePass.setBindGroup(0, bindGroup)
-    computePass.dispatchWorkgroups(Math.ceil(width / workgroupSize), height)
-    computePass.end()
-    commandEncoder.copyTextureToBuffer(
-      {texture: outputTexture},
-      {buffer: outputBuffer, bytesPerRow},
-      [width, height]
-    )
-    console.log('Submitting command buffer to GPU queue')
-    device.queue.submit([commandEncoder.finish()])
-    await outputBuffer.mapAsync(GPUMapMode.READ)
-    try {
-      const outputData = new Uint8ClampedArray(outputBuffer.getMappedRange()).slice()
-      outputImage = new ImageData(outputData, bytesPerRow / 4, height)
-      return outputData
-    } finally {
-      outputBuffer.unmap()
-    }
-  }
-
   try {
     // Create shader module
     const gaussianModule = device.createShaderModule({
@@ -270,6 +246,41 @@ export async function testGaussianBlurShader (device, results) {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
 
+    async function runShader (gaussianPipeline, bindGroup, width, height, outputTexture, horizontal) {
+      directionView.set(horizontal)
+      device.queue.writeBuffer(paramsBuffer, 0, directionView.arrayBuffer)
+      // Calculate bytesPerRow, which must be a multiple of 256 for WebGPU
+      const bytesPerRow = Math.ceil((width * 4) / 256) * 256
+      // Create a buffer to copy the texture data to
+      const outputBuffer = device.createBuffer({
+        size: bytesPerRow * height,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      })
+      const commandEncoder = device.createCommandEncoder()
+      const computePass = commandEncoder.beginComputePass()
+      computePass.setPipeline(gaussianPipeline)
+      computePass.setBindGroup(0, bindGroup)
+      const workGroups = horizontal ? [Math.ceil(width / workgroupSize), height] : [Math.ceil(height / workgroupSize), width]
+      computePass.dispatchWorkgroups(...workGroups)
+      computePass.end()
+      commandEncoder.copyTextureToBuffer(
+        {texture: outputTexture},
+        {buffer: outputBuffer, bytesPerRow},
+        [width, height]
+      )
+      console.log('Submitting command buffer to GPU queue')
+      device.queue.submit([commandEncoder.finish()])
+      await outputBuffer.mapAsync(GPUMapMode.READ)
+      try {
+        const outputData = new Uint8ClampedArray(outputBuffer.getMappedRange()).slice()
+        outputImage = new ImageData(outputData, bytesPerRow / 4, height)
+        return outputData
+      } finally {
+        outputBuffer.unmap()
+        outputBuffer.destroy()
+      }
+    }
+
     function computeGaussianValue (radius, kernelRadius) {
       const sigma = kernelRadius / 3 // 3*sigma covers >99% of Gaussian
       const twoSigmaSquared = 2.0 * sigma * sigma
@@ -278,9 +289,6 @@ export async function testGaussianBlurShader (device, results) {
 
     const quenelle = Float32Array.from({length: kernelRadius}, (_, i) => computeGaussianValue(i, kernelRadius))
     console.log('computeGaussianValue', quenelle)
-    directionView.set(1)
-    device.queue.writeBuffer(paramsBuffer, 0, directionView.arrayBuffer)
-
     const kernelBuffer = device.createBuffer({
       size: quenelle.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -298,18 +306,9 @@ export async function testGaussianBlurShader (device, results) {
         {binding: 4, resource: {buffer: kernelBuffer}},
       ]
     })
-    // Calculate bytesPerRow, which must be a multiple of 256 for WebGPU
-    const bytesPerRow = Math.ceil((width * 4) / 256) * 256
-    // Create a buffer to copy the texture data to
-    const outputBuffer = device.createBuffer({
-      size: bytesPerRow * height,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    })
 
-    directionView.set(1)
-    device.queue.writeBuffer(paramsBuffer, 0, directionView.arrayBuffer)
     // Run the shader
-    let outputData = await runShader(gaussianPipeline, bindGroup, width, height, outputTexture, outputBuffer, bytesPerRow)
+    let outputData = await runShader(gaussianPipeline, bindGroup, width, height, outputTexture, 1)
 
     let whiteRowUntouched = true
     for (let x = 0; x < width; x++) {
@@ -327,9 +326,10 @@ export async function testGaussianBlurShader (device, results) {
       outputImage
     )
     let grayRowDetected = true
-    for (let x = 10; x < width - 10; x++) {
-      const index = (y * width + y) * 4
-      grayRowDetected &= outputData[index] === 224 && outputData[index + 1] === 224 && outputData[index + 2] === 224
+    for (let x = 20; x < width - 20; x++) {
+      let y = 1
+      const index = (y * width + x) * 4
+      grayRowDetected &= outputData[index] === 207 && outputData[index + 1] === 207 && outputData[index + 2] === 207
     }
     addTestResult(
       results,
@@ -340,7 +340,38 @@ export async function testGaussianBlurShader (device, results) {
       inputImage,
       outputImage
     )
-
+    // vertical test
+    outputData = await runShader(gaussianPipeline, bindGroup, width, height, outputTexture, 0)
+    let whiteColumnUntouched = true
+    for (let y = 0; y < height; y++) {
+      let x = 0 //first row should be white
+      const index = (y * width + x) * 4
+      whiteColumnUntouched &= outputData[index] === 255 && outputData[index + 1] === 255 && outputData[index + 2] === 255
+    }
+    addTestResult(
+      results,
+      'Gaussian Blur Vertical Pass',
+      whiteColumnUntouched,
+      whiteColumnUntouched ? 'Blur effect left the white column 0 alone' : 'Blur effect modified the all white column 0',
+      whiteColumnUntouched ? null : 'The first column had some non-white pixels',
+      inputImage,
+      outputImage
+    )
+    let grayColumnDetected = true
+    for (let y = 20; y < height - 20; y++) {
+      const x=1
+      const index = (y * width + x) * 4
+      grayColumnDetected &= outputData[index] === 207 && outputData[index + 1] === 207 && outputData[index + 2] === 207
+    }
+    addTestResult(
+      results,
+      'Gaussian Blur Vertical Pass',
+      grayColumnDetected,
+      grayColumnDetected ? 'Blur effect grayed the checkered column 1' : 'didn\'t get the expected all gray column',
+      grayColumnDetected ? null : 'didn\'t get the expected all gray column',
+      inputImage,
+      outputImage
+    )
     // Clean up
     paramsBuffer.destroy()
     kernelBuffer.destroy()
