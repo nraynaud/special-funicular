@@ -10,33 +10,43 @@ export const CONTRAST_THRESHOLD = 0.001; // Reduced threshold to detect more fea
 export const EDGE_THRESHOLD = 5.0;
 export const MAX_KEYPOINTS = 10000;
 
+// language=WGSL
 export const radialKernelShader = `
 override workgroup_size = 64;
-override kernelRadius = 20;
-override workgroupPixelCount = workgroup_size + 2 * (kernelRadius - 1);
+override kernel_radius = 20;
+override workgroup_pixel_count = workgroup_size + 2 * (kernel_radius - 1);
 @group(0) @binding(0) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(1) var diffuseSampler: sampler;
 @group(0) @binding(2) var inputTexture: texture_2d<f32>;
-@group(0) @binding(3) var<uniform> direction: vec2<u32>;
+@group(0) @binding(3) var<uniform> horizontal: i32;
 @group(0) @binding(4) var<storage, read> kernel: array<f32>;
-var<workgroup> workgroupPixels: array<vec4<f32>, workgroupPixelCount>;
+var<workgroup> workgroupPixels: array<vec4<f32>, workgroup_pixel_count>;
 
 @compute @workgroup_size(workgroup_size, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>, 
     @builtin(workgroup_id) workgroup_id: vec3<u32>, 
     @builtin(local_invocation_id) local_id: vec3<u32>) {
-  let pixel_pos = vec2<u32>(global_id.xy);
+  var pixel_pos = vec2u(global_id.xy);
+  var workgroup_pos = vec2u(workgroup_id.xy);
+  var local_pos = vec2u(local_id.xy);
+  var direction = vec2u(1, 0);
+  if (horizontal==0) {
+    pixel_pos = pixel_pos.yx;
+    workgroup_pos = workgroup_pos.yx;
+    local_pos = local_pos.yx;
+    direction = direction.yx;
+  }
   let outputSize = textureDimensions(outputTexture);
   let otherDirection = direction.yx;
   
   // *** 1) put some input pixels in workgroup memory
   // -1 for the first pixel of the kernel (the center), who is not repeated
-  let workgroupReadPixelsCount = workgroup_size + (kernelRadius - 1) * 2;
-  let workgroupPosInDirection = i32(length(vec2f(workgroup_id.xy * direction)));
-  let workgroupFirstReadPixel = i32(workgroup_size * workgroupPosInDirection) - kernelRadius + 1;
+  let workgroupReadPixelsCount = workgroup_size + (kernel_radius - 1) * 2;
+  let workgroupPosInDirection = i32(length(vec2f(workgroup_pos * direction)));
+  let workgroupFirstReadPixel = i32(workgroup_size * workgroupPosInDirection) - kernel_radius + 1;
   // how many pixels will each thread read from the input texture (sampler allows reading outside the texture)
   let memberPixelCount = u32(ceil(f32(workgroupReadPixelsCount) / f32(workgroup_size)));
-  let localPosInDirection = u32(length(vec2f(local_id.xy * direction)));
+  let localPosInDirection = u32(length(vec2f(local_pos * direction)));
   let myFirstWritePixel = localPosInDirection * memberPixelCount;
   let myFirstInputPixel = u32(workgroupFirstReadPixel) + localPosInDirection * memberPixelCount;
   let myFirstInputPosition = vec2f(myFirstInputPixel * direction + pixel_pos * otherDirection);
@@ -52,10 +62,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>,
   if (pixel_pos.x >= outputSize.x || pixel_pos.y >= outputSize.y) {
     return;
   }
-  let myWorkgroupPixelOffset = i32(localPosInDirection) + kernelRadius - 1;
+  let myWorkgroupPixelOffset = i32(localPosInDirection) + kernel_radius - 1;
   var sum = vec4<f32>(0.0);
   var weightSum = 0.0;
-  for (var i = -kernelRadius + 1; i < kernelRadius; i++) {
+  for (var i = -kernel_radius + 1; i < kernel_radius; i++) {
     let weight = kernel[abs(i)];
     let samplePos = myWorkgroupPixelOffset + i;
     let texel = workgroupPixels[samplePos];

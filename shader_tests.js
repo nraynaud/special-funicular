@@ -1,22 +1,22 @@
 // Shader Unit Tests
 // This file contains unit tests with assertions for each shader in the SIFT implementation
 
+import {
+  createTextureFromSource,
+  makeBindGroupLayoutDescriptors,
+  makeShaderDataDefinitions,
+  makeStructuredView
+} from './lib/webgpu-utils.module.js'
 // Import shared shader code and constants
 import {
   CONTRAST_THRESHOLD,
-  EDGE_THRESHOLD,
-  MAX_KEYPOINTS,
-  gaussianBlurShader,
   dogShader,
+  EDGE_THRESHOLD,
   keypointDetectionShader,
-  visualizeKeypointsShader, radialKernelShader
+  MAX_KEYPOINTS,
+  radialKernelShader,
+  visualizeKeypointsShader
 } from './sift-shaders.js'
-
-import {
-  makeShaderDataDefinitions,
-  makeStructuredView,
-  makeBindGroupLayoutDescriptors, createTextureFromSource
-} from './lib/webgpu-utils.module.js'
 
 // Main test function that runs all shader tests
 export async function runShaderTests () {
@@ -157,10 +157,39 @@ function createDirectionalTestPattern (height, width, textureData) {
 
 // Test for Gaussian Blur Shader
 export async function testGaussianBlurShader (device, results) {
+  const y = 1 //second row should be gray
   console.log('Testing Gaussian Blur Shader...')
 
   let inputImage
   let outputImage
+
+  const workgroupSize = 64
+  const kernelRadius = 20
+
+  async function runShader (gaussianPipeline, bindGroup, width, height, outputTexture, outputBuffer, bytesPerRow) {
+    const commandEncoder = device.createCommandEncoder()
+    const computePass = commandEncoder.beginComputePass()
+    computePass.setPipeline(gaussianPipeline)
+    computePass.setBindGroup(0, bindGroup)
+    computePass.dispatchWorkgroups(Math.ceil(width / workgroupSize), height)
+    computePass.end()
+    commandEncoder.copyTextureToBuffer(
+      {texture: outputTexture},
+      {buffer: outputBuffer, bytesPerRow},
+      [width, height]
+    )
+    console.log('Submitting command buffer to GPU queue')
+    device.queue.submit([commandEncoder.finish()])
+    await outputBuffer.mapAsync(GPUMapMode.READ)
+    try {
+      const outputData = new Uint8ClampedArray(outputBuffer.getMappedRange()).slice()
+      outputImage = new ImageData(outputData, bytesPerRow / 4, height)
+      return outputData
+    } finally {
+      outputBuffer.unmap()
+    }
+  }
+
   try {
     // Create shader module
     const gaussianModule = device.createShaderModule({
@@ -173,23 +202,24 @@ export async function testGaussianBlurShader (device, results) {
     console.log('DEFINITIONS', defs)
 
     // Create compute pipeline
-    let pipelineDesc = {
+    const pipelineDesc = {
       label: 'Gaussian Blur Pipeline Test',
       layout: 'auto',
       compute: {
         module: gaussianModule,
         entryPoint: 'main',
         constants: {
-          kernelRadius: 20
+          kernel_radius: kernelRadius,
+          workgroup_size: workgroupSize
         },
       }
     }
-    const descriptors = makeBindGroupLayoutDescriptors(defs, pipelineDesc);
+    const descriptors = makeBindGroupLayoutDescriptors(defs, pipelineDesc)
     console.log('LAYOUTS', descriptors)
     const gaussianPipeline = device.createComputePipeline(pipelineDesc)
     addTestResult(results, 'Gaussian Blur Shader Compilation', true, 'Shader compiled successfully')
     // Test 2: Verify horizontal blur
-    const width = 128
+    const width = 256
     const height = 128
     // Create a checkerboard pattern for better visibility of blur effect
     const textureData = new Uint8ClampedArray(width * height * 4)
@@ -232,7 +262,7 @@ export async function testGaussianBlurShader (device, results) {
       addressModeV: 'mirror-repeat'
     })
 
-    const directionView = makeStructuredView(defs.uniforms.direction)
+    const directionView = makeStructuredView(defs.uniforms.horizontal)
 
     // Create uniform buffer for Gaussian parameters (horizontal pass)
     const paramsBuffer = device.createBuffer({
@@ -246,20 +276,9 @@ export async function testGaussianBlurShader (device, results) {
       return Math.exp(-(radius * radius) / twoSigmaSquared) / (Math.PI * twoSigmaSquared)
     }
 
-    const kernelRadius = 20
-    let quenelle = Float32Array.from({length: kernelRadius}, (_, i) => computeGaussianValue(i, kernelRadius))
+    const quenelle = Float32Array.from({length: kernelRadius}, (_, i) => computeGaussianValue(i, kernelRadius))
     console.log('computeGaussianValue', quenelle)
-    const horizontal = {
-      workgroups: [Math.ceil(width / 64), height],
-      vector: [1.0, 0.0]
-    }
-    const vertical = {
-      workgroups: [width, Math.ceil(height / 64)],
-      vector: [0.0, 1.0]
-    }
-
-    const direction = horizontal
-    directionView.set(direction.vector)
+    directionView.set(1)
     device.queue.writeBuffer(paramsBuffer, 0, directionView.arrayBuffer)
 
     const kernelBuffer = device.createBuffer({
@@ -287,25 +306,10 @@ export async function testGaussianBlurShader (device, results) {
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
     })
 
+    directionView.set(1)
+    device.queue.writeBuffer(paramsBuffer, 0, directionView.arrayBuffer)
     // Run the shader
-    const commandEncoder = device.createCommandEncoder()
-    const computePass = commandEncoder.beginComputePass()
-    computePass.setPipeline(gaussianPipeline)
-    computePass.setBindGroup(0, bindGroup)
-
-
-    computePass.dispatchWorkgroups(...direction.workgroups)
-    computePass.end()
-    commandEncoder.copyTextureToBuffer(
-      {texture: outputTexture},
-      {buffer: outputBuffer, bytesPerRow},
-      [width, height]
-    )
-    console.log('Submitting command buffer to GPU queue')
-    device.queue.submit([commandEncoder.finish()])
-    await outputBuffer.mapAsync(GPUMapMode.READ)
-    let outputData = new Uint8ClampedArray(outputBuffer.getMappedRange())
-    outputImage = new ImageData(outputData, bytesPerRow / 4, height)
+    let outputData = await runShader(gaussianPipeline, bindGroup, width, height, outputTexture, outputBuffer, bytesPerRow)
 
     let whiteRowUntouched = true
     for (let x = 0; x < width; x++) {
@@ -324,7 +328,6 @@ export async function testGaussianBlurShader (device, results) {
     )
     let grayRowDetected = true
     for (let x = 10; x < width - 10; x++) {
-      let y = 1 //second row should be gray
       const index = (y * width + y) * 4
       grayRowDetected &= outputData[index] === 224 && outputData[index + 1] === 224 && outputData[index + 2] === 224
     }
