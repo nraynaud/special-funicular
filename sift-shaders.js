@@ -10,6 +10,65 @@ export const CONTRAST_THRESHOLD = 0.001; // Reduced threshold to detect more fea
 export const EDGE_THRESHOLD = 5.0;
 export const MAX_KEYPOINTS = 10000;
 
+export const radialKernelShader = `
+override workgroup_size = 64;
+override kernelRadius = 20;
+override workgroupPixelCount = workgroup_size + 2 * (kernelRadius - 1);
+@group(0) @binding(0) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(1) var diffuseSampler: sampler;
+@group(0) @binding(2) var inputTexture: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> direction: vec2<u32>;
+@group(0) @binding(4) var<storage, read> kernel: array<f32>;
+var<workgroup> workgroupPixels: array<vec4<f32>, workgroupPixelCount>;
+
+@compute @workgroup_size(workgroup_size, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>, 
+    @builtin(workgroup_id) workgroup_id: vec3<u32>, 
+    @builtin(local_invocation_id) local_id: vec3<u32>) {
+  let pixel_pos = vec2<u32>(global_id.xy);
+  let outputSize = textureDimensions(outputTexture);
+  let otherDirection = direction.yx;
+  
+  // *** 1) put some input pixels in workgroup memory
+  // -1 for the first pixel of the kernel (the center), who is not repeated
+  let workgroupReadPixelsCount = workgroup_size + (kernelRadius - 1) * 2;
+  let workgroupPosInDirection = i32(length(vec2f(workgroup_id.xy * direction)));
+  let workgroupFirstReadPixel = i32(workgroup_size * workgroupPosInDirection) - kernelRadius + 1;
+  // how many pixels will each thread read from the input texture (sampler allows reading outside the texture)
+  let memberPixelCount = u32(ceil(f32(workgroupReadPixelsCount) / f32(workgroup_size)));
+  let localPosInDirection = u32(length(vec2f(local_id.xy * direction)));
+  let myFirstWritePixel = localPosInDirection * memberPixelCount;
+  let myFirstInputPixel = u32(workgroupFirstReadPixel) + localPosInDirection * memberPixelCount;
+  let myFirstInputPosition = vec2f(myFirstInputPixel * direction + pixel_pos * otherDirection);
+  for (var i = u32(0); i < memberPixelCount; i++) {
+    let offset = vec2f(direction) * f32(i);
+    let samplePos = (myFirstInputPosition + offset) / vec2f(outputSize);
+    let texel = textureSampleLevel(inputTexture, diffuseSampler, samplePos , 0);
+    workgroupPixels[myFirstWritePixel+i] = texel;
+  }
+  workgroupBarrier();
+  
+  // *** 2) compute the 1D kernel
+  if (pixel_pos.x >= outputSize.x || pixel_pos.y >= outputSize.y) {
+    return;
+  }
+  let myWorkgroupPixelOffset = i32(localPosInDirection) + kernelRadius - 1;
+  var sum = vec4<f32>(0.0);
+  var weightSum = 0.0;
+  for (var i = -kernelRadius + 1; i < kernelRadius; i++) {
+    let weight = kernel[abs(i)];
+    let samplePos = myWorkgroupPixelOffset + i;
+    let texel = workgroupPixels[samplePos];
+    sum += texel * weight;
+    weightSum += weight;
+  }
+  var result: vec4<f32>;
+  result = sum / weightSum;
+  result.a = 1.0;
+  textureStore(outputTexture, pixel_pos, result);
+}
+`
+
 export const gaussianBlurShader = `
 @group(0) @binding(0) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(1) var diffuseSampler: sampler;
@@ -33,55 +92,30 @@ fn gaussian(x: f32, sigma: f32) -> f32 {
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let imageSize = vec2<i32>(params.imageSize.xy);
   let pixel_pos = vec2<i32>(global_id.xy);
-
   if (pixel_pos.x >= imageSize.x || pixel_pos.y >= imageSize.y) {
     return;
   }
 
   // First, read the center pixel to ensure we have a valid starting point
   let centerTexel = textureLoad(inputTexture, pixel_pos, 0);
-
   // Determine kernel radius based on sigma (3*sigma covers >99% of Gaussian)
   let kernelRadius = i32(ceil(3.0 * params.sigma));
   var sum = vec4<f32>(0.0);
   var weightSum = 0.0;
-
-  // Apply separable Gaussian filter
   for (var i = -kernelRadius; i <= kernelRadius; i++) {
     let weight = gaussian(f32(i), params.sigma);
-
-    // Calculate offset based on direction (horizontal or vertical)
-    // For horizontal blur: offset = (i, 0)
-    // For vertical blur: offset = (0, i)
-    let offset = vec2<i32>(
-      i32(round(f32(i) * params.direction.x)), 
-      i32(round(f32(i) * params.direction.y))
-    );
-
-    let samplePos = pixel_pos + offset;
-
-    // Clamp to image boundaries
-    let clampedPos = vec2<i32>(
-      clamp(samplePos.x, 0, imageSize.x - 1),
-      clamp(samplePos.y, 0, imageSize.y - 1)
-    );
-
-    let texel = textureSampleLevel(inputTexture, diffuseSampler, ( vec2<f32>(pixel_pos) + params.direction*f32(i) )/params.imageSize, 0);
+    let samplePos = (vec2<f32>(pixel_pos) + params.direction*f32(i)) / params.imageSize;
+    let texel = textureSampleLevel(inputTexture, diffuseSampler, samplePos , 0);
     sum += texel * weight;
     weightSum += weight;
   }
-
   // Normalize by weight sum and ensure we don't divide by zero
   var result: vec4<f32>;
   if (weightSum > 0.0) {
     result = sum / weightSum;
   } else {
-    // If weightSum is zero (shouldn't happen with our modified gaussian function),
-    // just use the center pixel
     result = centerTexel;
   }
-
-  // Ensure the result has full opacity
   result.a = 1.0;
   textureStore(outputTexture, pixel_pos, result);
 }
@@ -198,17 +232,17 @@ fn passesEdgeThreshold(pos: vec2<i32>) -> bool {
 
   // Compute the 2x2 Hessian matrix at (x, y)
   let center = textureLoad(dogTextureCurrent, pos, 0).r;
-  let dx = (textureLoad(dogTextureCurrent, pos + vec2<i32>(1, 0), 0).r - 
+  let dx = (textureLoad(dogTextureCurrent, pos + vec2<i32>(1, 0), 0).r -
             textureLoad(dogTextureCurrent, pos - vec2<i32>(1, 0), 0).r) * 0.5;
-  let dy = (textureLoad(dogTextureCurrent, pos + vec2<i32>(0, 1), 0).r - 
+  let dy = (textureLoad(dogTextureCurrent, pos + vec2<i32>(0, 1), 0).r -
             textureLoad(dogTextureCurrent, pos - vec2<i32>(0, 1), 0).r) * 0.5;
-  let dxx = textureLoad(dogTextureCurrent, pos + vec2<i32>(1, 0), 0).r + 
+  let dxx = textureLoad(dogTextureCurrent, pos + vec2<i32>(1, 0), 0).r +
             textureLoad(dogTextureCurrent, pos - vec2<i32>(1, 0), 0).r - 2.0 * center;
-  let dyy = textureLoad(dogTextureCurrent, pos + vec2<i32>(0, 1), 0).r + 
+  let dyy = textureLoad(dogTextureCurrent, pos + vec2<i32>(0, 1), 0).r +
             textureLoad(dogTextureCurrent, pos - vec2<i32>(0, 1), 0).r - 2.0 * center;
-  let dxy = (textureLoad(dogTextureCurrent, pos + vec2<i32>(1, 1), 0).r - 
-             textureLoad(dogTextureCurrent, pos + vec2<i32>(1, -1), 0).r - 
-             textureLoad(dogTextureCurrent, pos + vec2<i32>(-1, 1), 0).r + 
+  let dxy = (textureLoad(dogTextureCurrent, pos + vec2<i32>(1, 1), 0).r -
+             textureLoad(dogTextureCurrent, pos + vec2<i32>(1, -1), 0).r -
+             textureLoad(dogTextureCurrent, pos + vec2<i32>(-1, 1), 0).r +
              textureLoad(dogTextureCurrent, pos + vec2<i32>(-1, -1), 0).r) * 0.25;
 
   // Calculate the ratio of eigenvalues

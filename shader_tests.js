@@ -9,12 +9,13 @@ import {
   gaussianBlurShader,
   dogShader,
   keypointDetectionShader,
-  visualizeKeypointsShader
+  visualizeKeypointsShader, radialKernelShader
 } from './sift-shaders.js'
 
 import {
   makeShaderDataDefinitions,
   makeStructuredView,
+  makeBindGroupLayoutDescriptors, createTextureFromSource
 } from './lib/webgpu-utils.module.js'
 
 // Main test function that runs all shader tests
@@ -129,6 +130,31 @@ async function readTextureData (device, texture, width, height) {
   return pixelData
 }
 
+function createDirectionalTestPattern (height, width, textureData) {
+  // Create a weird checkerboard pattern where some rows and columns are white
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4
+      const whiteLine = y % 4 === 0
+      const whiteColumn = x % 4 === 0
+      const isBlack = !whiteLine && !whiteColumn && ((Math.floor(x / 4) + Math.floor(y / 4)) % 2 === 0)
+
+      if (isBlack) {
+        // Black cell
+        textureData[i] = 0     // R
+        textureData[i + 1] = 0 // G
+        textureData[i + 2] = 0 // B
+      } else {
+        // White cell
+        textureData[i] = 255     // R
+        textureData[i + 1] = 255 // G
+        textureData[i + 2] = 255 // B
+      }
+      textureData[i + 3] = 255 // A always fully opaque
+    }
+  }
+}
+
 // Test for Gaussian Blur Shader
 export async function testGaussianBlurShader (device, results) {
   console.log('Testing Gaussian Blur Shader...')
@@ -139,52 +165,35 @@ export async function testGaussianBlurShader (device, results) {
     // Create shader module
     const gaussianModule = device.createShaderModule({
       label: 'Gaussian Blur Shader Test',
-      code: gaussianBlurShader
+      code: radialKernelShader
     })
 
-    const defs = makeShaderDataDefinitions(gaussianBlurShader)
+    const defs = makeShaderDataDefinitions(radialKernelShader)
+
+    console.log('DEFINITIONS', defs)
 
     // Create compute pipeline
-    const gaussianPipeline = device.createComputePipeline({
+    let pipelineDesc = {
       label: 'Gaussian Blur Pipeline Test',
       layout: 'auto',
       compute: {
         module: gaussianModule,
-        entryPoint: 'main'
+        entryPoint: 'main',
+        constants: {
+          kernelRadius: 20
+        },
       }
-    })
-
+    }
+    const descriptors = makeBindGroupLayoutDescriptors(defs, pipelineDesc);
+    console.log('LAYOUTS', descriptors)
+    const gaussianPipeline = device.createComputePipeline(pipelineDesc)
     addTestResult(results, 'Gaussian Blur Shader Compilation', true, 'Shader compiled successfully')
-
     // Test 2: Verify horizontal blur
     const width = 128
     const height = 128
-    const sigma = 8
-
     // Create a checkerboard pattern for better visibility of blur effect
     const textureData = new Uint8ClampedArray(width * height * 4)
-
-    // Create a checkerboard pattern
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const i = (y * width + x) * 4
-        // Create 4x4 checkerboard cells
-        const isBlack = ((Math.floor(x / 4) + Math.floor(y / 4)) % 2 === 0)
-
-        if (isBlack) {
-          // Black cell
-          textureData[i] = 0     // R
-          textureData[i + 1] = 0 // G
-          textureData[i + 2] = 0 // B
-        } else {
-          // White cell
-          textureData[i] = 255     // R
-          textureData[i + 1] = 255 // G
-          textureData[i + 2] = 255 // B
-        }
-        textureData[i + 3] = 255 // A always fully opaque
-      }
-    }
+    createDirectionalTestPattern(height, width, textureData)
     inputImage = new ImageData(textureData, width)
     // Keep track of the middle for testing
     const midX = Math.floor(width / 2)
@@ -205,19 +214,7 @@ export async function testGaussianBlurShader (device, results) {
       console.log(`Pixel at (${x}, ${midY}): RGBA=(${textureData[idx]}, ${textureData[idx + 1]}, ${textureData[idx + 2]}, ${textureData[idx + 3]})`)
     }
 
-    const inputTexture = device.createTexture({
-      size: [width, height],
-      format: 'rgba8unorm',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC
-    })
-
-    device.queue.writeTexture(
-      {texture: inputTexture},
-      textureData,
-      {bytesPerRow: width * 4},
-      [width, height]
-    )
-
+    const inputTexture = createTextureFromSource(device, inputImage)
     // Create output texture with additional usage flags
     const outputTexture = device.createTexture({
       size: [width, height],
@@ -233,43 +230,57 @@ export async function testGaussianBlurShader (device, results) {
       mipmapFilter: 'linear',
       addressModeU: 'mirror-repeat',
       addressModeV: 'mirror-repeat'
-    });
+    })
 
-    const myUniformValues = makeStructuredView(defs.uniforms.params)
+    const directionView = makeStructuredView(defs.uniforms.direction)
 
     // Create uniform buffer for Gaussian parameters (horizontal pass)
     const paramsBuffer = device.createBuffer({
-      size: myUniformValues.arrayBuffer.byteLength,
+      size: directionView.arrayBuffer.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-// Set some values via set
-    myUniformValues.set({
-      sigma: sigma,
-      direction: [1.0, 0.0],
-      imageSize: [width, height]
+
+    function computeGaussianValue (radius, kernelRadius) {
+      const sigma = kernelRadius / 3 // 3*sigma covers >99% of Gaussian
+      const twoSigmaSquared = 2.0 * sigma * sigma
+      return Math.exp(-(radius * radius) / twoSigmaSquared) / (Math.PI * twoSigmaSquared)
+    }
+
+    const kernelRadius = 20
+    let quenelle = Float32Array.from({length: kernelRadius}, (_, i) => computeGaussianValue(i, kernelRadius))
+    console.log('computeGaussianValue', quenelle)
+    const horizontal = {
+      workgroups: [Math.ceil(width / 64), height],
+      vector: [1.0, 0.0]
+    }
+    const vertical = {
+      workgroups: [width, Math.ceil(height / 64)],
+      vector: [0.0, 1.0]
+    }
+
+    const direction = horizontal
+    directionView.set(direction.vector)
+    device.queue.writeBuffer(paramsBuffer, 0, directionView.arrayBuffer)
+
+    const kernelBuffer = device.createBuffer({
+      size: quenelle.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
-    device.queue.writeBuffer(paramsBuffer, 0, myUniformValues.arrayBuffer)
-    console.log(gaussianPipeline.getBindGroupLayout(0))
+    device.queue.writeBuffer(kernelBuffer, 0, quenelle)
     // Create bind group
     const bindGroup = device.createBindGroup({
-      label: "Gauss bind group 0",
+      label: 'Gauss bind group 0',
       layout: gaussianPipeline.getBindGroupLayout(0),
       entries: [
         {binding: 0, resource: outputTexture.createView()},
         {binding: 1, resource: sampler},
         {binding: 2, resource: inputTexture.createView()},
         {binding: 3, resource: {buffer: paramsBuffer}},
+        {binding: 4, resource: {buffer: kernelBuffer}},
       ]
     })
-
-    // Log the bind group entries for debugging
-    console.log('Bind group entries:')
-    console.log(`  Binding 0: Input texture (${inputTexture.width}x${inputTexture.height})`)
-    console.log(`  Binding 1: Output texture (${outputTexture.width}x${outputTexture.height})`)
-    console.log(`  Binding 2: Params buffer (sigma=${sigma}, direction=[${1.0}, ${0.0}], imageSize=[${width}, ${height}])`)
     // Calculate bytesPerRow, which must be a multiple of 256 for WebGPU
     const bytesPerRow = Math.ceil((width * 4) / 256) * 256
-
     // Create a buffer to copy the texture data to
     const outputBuffer = device.createBuffer({
       size: bytesPerRow * height,
@@ -282,12 +293,8 @@ export async function testGaussianBlurShader (device, results) {
     computePass.setPipeline(gaussianPipeline)
     computePass.setBindGroup(0, bindGroup)
 
-    // Log the dispatch size
-    const workgroupsX = Math.ceil(width / 16)
-    const workgroupsY = Math.ceil(height / 16)
-    console.log(`Dispatching compute shader with ${workgroupsX}x${workgroupsY} workgroups`)
 
-    computePass.dispatchWorkgroups(workgroupsX, workgroupsY)
+    computePass.dispatchWorkgroups(...direction.workgroups)
     computePass.end()
     commandEncoder.copyTextureToBuffer(
       {texture: outputTexture},
@@ -298,80 +305,44 @@ export async function testGaussianBlurShader (device, results) {
     device.queue.submit([commandEncoder.finish()])
     await outputBuffer.mapAsync(GPUMapMode.READ)
     let outputData = new Uint8ClampedArray(outputBuffer.getMappedRange())
-    outputData[0] = 255
-    outputData[3] = 255
     outputImage = new ImageData(outputData, bytesPerRow / 4, height)
 
-    // For this test, we'll just verify that the shader runs without errors
-    // The actual blur effect is difficult to test reliably across different WebGPU implementations
-
-    // Log more detailed information about the output for debugging
-    console.log('Output texture data (horizontal line through the middle):')
-    const outputMidY = Math.floor(height / 2)
+    let whiteRowUntouched = true
     for (let x = 0; x < width; x++) {
-      const index = (outputMidY * width + x) * 4
-      console.log(`Pixel at (${x}, ${outputMidY}): RGBA=(${outputData[index]}, ${outputData[index + 1]}, ${outputData[index + 2]}, ${outputData[index + 3]})`)
+      let y = 0 //first row should be white
+      const index = (y * width + x) * 4
+      whiteRowUntouched &= outputData[index] === 255 && outputData[index + 1] === 255 && outputData[index + 2] === 255
     }
-
-    // Check if the blur effect is visible by looking for gray pixels (neither pure black nor pure white)
-    let blurDetected = false
-    let grayPixelsCount = 0
-
-    // Sample several rows to check for blur
-    for (let y = 0; y < height; y += 4) {
-      for (let x = 0; x < width; x++) {
-        const index = (y * width + x) * 4
-
-        // Check if the pixel is gray (neither pure black nor pure white)
-        // Pure black: RGB = (0,0,0)
-        // Pure white: RGB = (255,255,255)
-        // Gray: anything in between
-        const isGray = (
-          (outputData[index] > 0 && outputData[index] < 255) ||
-          (outputData[index + 1] > 0 && outputData[index + 1] < 255) ||
-          (outputData[index + 2] > 0 && outputData[index + 2] < 255)
-        )
-
-        if (isGray) {
-          grayPixelsCount++
-          if (!blurDetected) {
-            blurDetected = true
-            console.log(`Blur detected at pixel (${x}, ${y}): RGBA=(${outputData[index]}, ${outputData[index + 1]}, ${outputData[index + 2]}, ${outputData[index + 3]})`)
-          }
-        }
-      }
-    }
-
-    if (blurDetected) {
-      console.log(`Blur effect detected. Found ${grayPixelsCount} gray pixels in the output.`)
-    } else {
-      console.log('No blur effect detected. All pixels are either pure black or pure white.')
-    }
-
-    // Log a few more pixels to get a better understanding of the output
-    console.log('Sampling more pixels across the texture:')
-    for (let y = 0; y < height; y += height / 4) {
-      for (let x = 0; x < width; x += width / 4) {
-        const index = (Math.floor(y) * width + Math.floor(x)) * 4
-        console.log(`Pixel at (${Math.floor(x)}, ${Math.floor(y)}): RGBA=(${outputData[index]}, ${outputData[index + 1]}, ${outputData[index + 2]}, ${outputData[index + 3]})`)
-      }
-    }
-
-    // Consider the test passed if blur was detected
     addTestResult(
       results,
       'Gaussian Blur Horizontal Pass',
-      blurDetected,
-      blurDetected ? 'Blur effect detected successfully' : 'Shader executed but no blur effect was detected',
-      blurDetected ? null : 'No blur effect detected. The Gaussian blur shader is not working correctly.',
+      whiteRowUntouched,
+      whiteRowUntouched ? 'Blur effect left the white row 0 alone' : 'Blur effect modified the all white row 0',
+      whiteRowUntouched ? null : 'The first row had some non-white pixels',
+      inputImage,
+      outputImage
+    )
+    let grayRowDetected = true
+    for (let x = 10; x < width - 10; x++) {
+      let y = 1 //second row should be gray
+      const index = (y * width + y) * 4
+      grayRowDetected &= outputData[index] === 224 && outputData[index + 1] === 224 && outputData[index + 2] === 224
+    }
+    addTestResult(
+      results,
+      'Gaussian Blur Horizontal Pass',
+      grayRowDetected,
+      grayRowDetected ? 'Blur effect grayed the checkered row 1' : 'didn\'t get the expected all gray line',
+      grayRowDetected ? null : 'didn\'t get the expected all gray line',
       inputImage,
       outputImage
     )
 
     // Clean up
+    paramsBuffer.destroy()
+    kernelBuffer.destroy()
     inputTexture.destroy()
     outputTexture.destroy()
-
   } catch (error) {
     console.error('Error testing Gaussian Blur Shader:', error)
     addTestResult(results, 'Gaussian Blur Shader', false, '', error.message, inputImage,
