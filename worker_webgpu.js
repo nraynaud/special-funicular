@@ -23,6 +23,7 @@ import {
  * @returns {Promise<Array>} - Array of SIFT keypoints
  */
 async function extractSIFTFeatures(device, imageData) {
+  return []
   debugLog('extractSIFTFeatures: Starting extraction');
   const { width, height, data } = imageData;
   debugLog(`extractSIFTFeatures: Image dimensions: ${width}x${height}`);

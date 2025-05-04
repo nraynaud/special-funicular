@@ -474,7 +474,9 @@
             '#shader-visualizeKeypoints': testVisualizeKeypointsShader,
           }
           // Request adapter and device
-          const adapter = await navigator.gpu.requestAdapter()
+          const adapter = await navigator.gpu.requestAdapter({
+            powerPreference: "high-performance"
+          })
           if (!adapter) {
             throw new Error('No appropriate GPU adapter found')
           }
@@ -482,7 +484,8 @@
 
           // Request device
           const device = await adapter.requestDevice({
-            label: 'Shader Test Device'
+            label: 'Shader Test Device',
+            requiredFeatures: ['timestamp-query'],
           })
           console.log('WebGPU device obtained')
 

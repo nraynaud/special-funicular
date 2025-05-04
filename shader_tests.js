@@ -43,7 +43,8 @@ export async function runShaderTests () {
 
     // Request device
     const device = await adapter.requestDevice({
-      label: 'Shader Test Device'
+      label: 'Shader Test Device',
+      requiredFeatures: ['timestamp-query'],
     })
     console.log('WebGPU device obtained')
 
@@ -157,7 +158,6 @@ function createDirectionalTestPattern (height, width, textureData) {
 
 // Test for Gaussian Blur Shader
 export async function testGaussianBlurShader (device, results) {
-  const y = 1 //second row should be gray
   console.log('Testing Gaussian Blur Shader...')
 
   let inputImage
@@ -256,8 +256,28 @@ export async function testGaussianBlurShader (device, results) {
         size: bytesPerRow * height,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
       })
+      const querySet = device.createQuerySet({
+        type: 'timestamp',
+        count: 2,
+      });
+      const resolveBuffer = device.createBuffer({
+        size: querySet.count * 8,
+        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+      });
+      const resultBuffer = device.createBuffer({
+        size: resolveBuffer.size,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+
       const commandEncoder = device.createCommandEncoder()
-      const computePass = commandEncoder.beginComputePass()
+      const computePass = commandEncoder.beginComputePass({
+        label:"Gussian compute pass",
+        timestampWrites: {
+          querySet,
+          beginningOfPassWriteIndex: 0,
+          endOfPassWriteIndex: 1,
+        },
+      })
       computePass.setPipeline(gaussianPipeline)
       computePass.setBindGroup(0, bindGroup)
       const workGroups = horizontal ? [Math.ceil(width / workgroupSize), height] : [Math.ceil(height / workgroupSize), width]
@@ -268,8 +288,17 @@ export async function testGaussianBlurShader (device, results) {
         {buffer: outputBuffer, bytesPerRow},
         [width, height]
       )
+      commandEncoder.resolveQuerySet(querySet, 0, querySet.count, resolveBuffer, 0);
+      commandEncoder.copyBufferToBuffer(resolveBuffer, 0, resultBuffer, 0, resultBuffer.size);
       console.log('Submitting command buffer to GPU queue')
       device.queue.submit([commandEncoder.finish()])
+      await device.queue.onSubmittedWorkDone()
+      resultBuffer.mapAsync(GPUMapMode.READ).then(() => {
+        const times = new BigInt64Array(resultBuffer.getMappedRange());
+        const gpuTime = Number(times[1] - times[0]);
+        console.log('GPU time', (gpuTime/1000).toFixed(1), "µs");
+        resultBuffer.unmap();
+      });
       await outputBuffer.mapAsync(GPUMapMode.READ)
       try {
         const outputData = new Uint8ClampedArray(outputBuffer.getMappedRange()).slice()
@@ -294,7 +323,6 @@ export async function testGaussianBlurShader (device, results) {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
     device.queue.writeBuffer(kernelBuffer, 0, quenelle)
-    // Create bind group
     const bindGroup = device.createBindGroup({
       label: 'Gauss bind group 0',
       layout: gaussianPipeline.getBindGroupLayout(0),
