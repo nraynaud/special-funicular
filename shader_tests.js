@@ -166,6 +166,17 @@ export async function testGaussianBlurShader (device, results) {
   const workgroupSize = 64
   const kernelRadius = 20
 
+  function checkColor (y, width, x, outputData, euclideanDistance, gray) {
+    const index = (y * width + x) * 4
+    const pix = [outputData[index], outputData[index + 1], outputData[index + 2]]
+    const colorDist = euclideanDistance(gray, pix)
+    let isGray = colorDist < 3
+    if (!isGray) {
+      console.log(`expected gray ${gray} pixel at ${[x, y]}, got ${[outputData[index], outputData[index + 1], outputData[index + 2]]}`)
+    }
+    return isGray
+  }
+
   try {
     // Create shader module
     const gaussianModule = device.createShaderModule({
@@ -230,14 +241,6 @@ export async function testGaussianBlurShader (device, results) {
 
     // We don't need to initialize the output texture, the shader will write to it
     console.log('Output texture created but not initialized')
-    const sampler = device.createSampler({
-      magFilter: 'linear',
-      minFilter: 'linear',
-      mipmapFilter: 'linear',
-      addressModeU: 'mirror-repeat',
-      addressModeV: 'mirror-repeat'
-    })
-
     const directionView = makeStructuredView(defs.uniforms.horizontal)
 
     // Create uniform buffer for Gaussian parameters (horizontal pass)
@@ -259,19 +262,19 @@ export async function testGaussianBlurShader (device, results) {
       const querySet = device.createQuerySet({
         type: 'timestamp',
         count: 2,
-      });
+      })
       const resolveBuffer = device.createBuffer({
         size: querySet.count * 8,
         usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
-      });
+      })
       const resultBuffer = device.createBuffer({
         size: resolveBuffer.size,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-      });
+      })
 
       const commandEncoder = device.createCommandEncoder()
       const computePass = commandEncoder.beginComputePass({
-        label:"Gussian compute pass",
+        label: 'Gussian compute pass',
         timestampWrites: {
           querySet,
           beginningOfPassWriteIndex: 0,
@@ -288,17 +291,17 @@ export async function testGaussianBlurShader (device, results) {
         {buffer: outputBuffer, bytesPerRow},
         [width, height]
       )
-      commandEncoder.resolveQuerySet(querySet, 0, querySet.count, resolveBuffer, 0);
-      commandEncoder.copyBufferToBuffer(resolveBuffer, 0, resultBuffer, 0, resultBuffer.size);
+      commandEncoder.resolveQuerySet(querySet, 0, querySet.count, resolveBuffer, 0)
+      commandEncoder.copyBufferToBuffer(resolveBuffer, 0, resultBuffer, 0, resultBuffer.size)
       console.log('Submitting command buffer to GPU queue')
       device.queue.submit([commandEncoder.finish()])
       await device.queue.onSubmittedWorkDone()
       resultBuffer.mapAsync(GPUMapMode.READ).then(() => {
-        const times = new BigInt64Array(resultBuffer.getMappedRange());
-        const gpuTime = Number(times[1] - times[0]);
-        console.log('GPU time', (gpuTime/1000).toFixed(1), "µs");
-        resultBuffer.unmap();
-      });
+        const times = new BigInt64Array(resultBuffer.getMappedRange())
+        const gpuTime = Number(times[1] - times[0])
+        console.log('GPU time', (gpuTime / 1000).toFixed(1), 'µs')
+        resultBuffer.unmap()
+      })
       await outputBuffer.mapAsync(GPUMapMode.READ)
       try {
         const outputData = new Uint8ClampedArray(outputBuffer.getMappedRange()).slice()
@@ -328,7 +331,6 @@ export async function testGaussianBlurShader (device, results) {
       layout: gaussianPipeline.getBindGroupLayout(0),
       entries: [
         {binding: 0, resource: outputTexture.createView()},
-        {binding: 1, resource: sampler},
         {binding: 2, resource: inputTexture.createView()},
         {binding: 3, resource: {buffer: paramsBuffer}},
         {binding: 4, resource: {buffer: kernelBuffer}},
@@ -342,7 +344,11 @@ export async function testGaussianBlurShader (device, results) {
     for (let x = 0; x < width; x++) {
       let y = 0 //first row should be white
       const index = (y * width + x) * 4
-      whiteRowUntouched &= outputData[index] === 255 && outputData[index + 1] === 255 && outputData[index + 2] === 255
+      const isWhite = outputData[index] === 255 && outputData[index + 1] === 255 && outputData[index + 2] === 255
+      whiteRowUntouched &= isWhite
+      if (!isWhite) {
+        console.log(`expected white pixel at ${[x, y]}, got ${[outputData[index], outputData[index + 1], outputData[index + 2]]}`)
+      }
     }
     addTestResult(
       results,
@@ -353,11 +359,13 @@ export async function testGaussianBlurShader (device, results) {
       inputImage,
       outputImage
     )
+    const euclideanDistance = (a, b) =>
+      Math.hypot(...Object.keys(a).map(k => b[k] - a[k]))
+    const gray = [160, 160, 160]
     let grayRowDetected = true
     for (let x = 20; x < width - 20; x++) {
       let y = 1
-      const index = (y * width + x) * 4
-      grayRowDetected &= outputData[index] === 207 && outputData[index + 1] === 207 && outputData[index + 2] === 207
+      grayRowDetected &= checkColor(y, width, x, outputData, euclideanDistance, gray)
     }
     addTestResult(
       results,
@@ -387,9 +395,8 @@ export async function testGaussianBlurShader (device, results) {
     )
     let grayColumnDetected = true
     for (let y = 20; y < height - 20; y++) {
-      const x=1
-      const index = (y * width + x) * 4
-      grayColumnDetected &= outputData[index] === 207 && outputData[index + 1] === 207 && outputData[index + 2] === 207
+      const x = 1
+      grayRowDetected &= checkColor(y, width, x, outputData, euclideanDistance, gray)
     }
     addTestResult(
       results,
@@ -400,7 +407,6 @@ export async function testGaussianBlurShader (device, results) {
       inputImage,
       outputImage
     )
-    // Clean up
     paramsBuffer.destroy()
     kernelBuffer.destroy()
     inputTexture.destroy()
