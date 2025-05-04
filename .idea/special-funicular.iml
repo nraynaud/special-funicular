@@ -13,5 +13,6 @@
     <orderEntry type="library" name="svg-pan-zoom" level="application" />
     <orderEntry type="library" name="twgl.js" level="application" />
     <orderEntry type="library" name="spectorjs" level="application" />
+    <orderEntry type="library" name="qunit-2.19.4" level="application" />
   </component>
 </module>

@@ -12,7 +12,6 @@ import {
   MAX_KEYPOINTS,
   gaussianBlurShader,
   dogShader,
-  keypointDetectionShader,
   visualizeKeypointsShader
 } from './sift-shaders.js';
 
@@ -130,90 +129,8 @@ async function extractSIFTFeatures(device, imageData) {
     throw error;
   }
 
-  // Create pipeline for keypoint detection
-  debugLog('extractSIFTFeatures: Creating keypoint detection shader module');
-  let keypointModule;
-  try {
-    keypointModule = device.createShaderModule({
-      label: 'Keypoint Detection Shader',
-      code: keypointDetectionShader
-    });
-    debugLog('extractSIFTFeatures: Keypoint detection shader module created successfully');
-  } catch (error) {
-    debugLog('extractSIFTFeatures: Error creating keypoint detection shader module', {
-      error: error.message,
-      shaderLength: keypointDetectionShader.length
-    });
-    throw error;
-  }
 
-  debugLog('extractSIFTFeatures: Creating keypoint detection pipeline');
-  let keypointPipeline;
-  try {
-    keypointPipeline = device.createComputePipeline({
-      label: 'Keypoint Detection Pipeline',
-      layout: 'auto',
-      compute: {
-        module: keypointModule,
-        entryPoint: 'main'
-      }
-    });
-    debugLog('extractSIFTFeatures: Keypoint detection pipeline created successfully');
-  } catch (error) {
-    debugLog('extractSIFTFeatures: Error creating keypoint detection pipeline', {
-      error: error.message
-    });
-    throw error;
-  }
-
-  // Create buffers for keypoints
-  debugLog('extractSIFTFeatures: Creating keypoint buffer');
-  let keypointBuffer;
-  try {
-    keypointBuffer = device.createBuffer({
-      label: 'Keypoint Storage Buffer',
-      size: MAX_KEYPOINTS * 5 * 4, // 5 floats per keypoint (x, y, scale, orientation, response)
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-    });
-    debugLog('extractSIFTFeatures: Keypoint buffer created successfully', {
-      size: MAX_KEYPOINTS * 5 * 4,
-      maxKeypoints: MAX_KEYPOINTS
-    });
-  } catch (error) {
-    debugLog('extractSIFTFeatures: Error creating keypoint buffer', {
-      error: error.message,
-      size: MAX_KEYPOINTS * 5 * 4
-    });
-    throw error;
-  }
-
-  debugLog('extractSIFTFeatures: Creating keypoint count buffer');
-  let keypointCountBuffer;
-  try {
-    keypointCountBuffer = device.createBuffer({
-      label: 'Keypoint Count Buffer',
-      size: 4, // Single u32 for count
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-    });
-    debugLog('extractSIFTFeatures: Keypoint count buffer created successfully');
-  } catch (error) {
-    debugLog('extractSIFTFeatures: Error creating keypoint count buffer', {
-      error: error.message
-    });
-    throw error;
-  }
-
-  // Initialize keypoint count to 0
-  debugLog('extractSIFTFeatures: Initializing keypoint count to 0');
-  try {
-    device.queue.writeBuffer(keypointCountBuffer, 0, new Uint32Array([0]));
-    debugLog('extractSIFTFeatures: Keypoint count initialized successfully');
-  } catch (error) {
-    debugLog('extractSIFTFeatures: Error initializing keypoint count', {
-      error: error.message
-    });
-    throw error;
-  }
+  // Note: Keypoint detection functionality has been removed
 
   // Create textures for Gaussian pyramid
   const gaussianPyramid = [];
@@ -462,118 +379,10 @@ async function extractSIFTFeatures(device, imageData) {
     }
   }
 
-  // Detect keypoints in DoG pyramid
-  for (let octave = 0; octave < NUM_OCTAVES; octave++) {
-    const octaveWidth = Math.floor(width / Math.pow(2, octave));
-    const octaveHeight = Math.floor(height / Math.pow(2, octave));
 
-    if (octaveWidth < 8 || octaveHeight < 8) {
-      continue;
-    }
-
-    const octaveDoGTextures = dogPyramid[octave];
-
-    // Skip first and last scale
-    for (let scale = 1; scale < SCALES_PER_OCTAVE - 1; scale++) {
-      // Create uniform buffer for keypoint parameters
-      const paramsBuffer = device.createBuffer({
-        label: `Keypoint Params Buffer Octave ${octave} Scale ${scale}`,
-        size: 20, // 5 values (contrastThreshold, edgeThreshold, maxKeypoints, octave, scale)
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-      });
-
-      device.queue.writeBuffer(
-        paramsBuffer,
-        0,
-        new Float32Array([
-          CONTRAST_THRESHOLD,
-          EDGE_THRESHOLD,
-          MAX_KEYPOINTS,
-          octave,
-          SIGMA_INITIAL * Math.pow(SIGMA_MULTIPLIER, (scale + 1) / SCALES_PER_OCTAVE)
-        ])
-      );
-
-      const bindGroup = device.createBindGroup({
-        label: `Keypoint Detection Bind Group Octave ${octave} Scale ${scale}`,
-        layout: keypointPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 1, resource: octaveDoGTextures[scale].createView() },
-          { binding: 3, resource: { buffer: keypointBuffer } },
-          { binding: 4, resource: { buffer: keypointCountBuffer } },
-          { binding: 5, resource: { buffer: paramsBuffer } }
-        ]
-      });
-
-      const commandEncoder = device.createCommandEncoder({
-        label: `Keypoint Detection Command Encoder Octave ${octave} Scale ${scale}`
-      });
-      const computePass = commandEncoder.beginComputePass({
-        label: `Keypoint Detection Compute Pass Octave ${octave} Scale ${scale}`
-      });
-      computePass.setPipeline(keypointPipeline);
-      computePass.setBindGroup(0, bindGroup);
-      computePass.dispatchWorkgroups(
-        Math.ceil(octaveWidth / 16),
-        Math.ceil(octaveHeight / 16)
-      );
-      computePass.end();
-      device.queue.submit([commandEncoder.finish()]);
-    }
-  }
-
-  // Read back keypoint data
-  const readBuffer = device.createBuffer({
-    label: 'Keypoint Count Read Buffer',
-    size: 4,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-  });
-
-  const commandEncoder = device.createCommandEncoder({
-    label: 'Keypoint Count Read Command Encoder'
-  });
-  commandEncoder.copyBufferToBuffer(keypointCountBuffer, 0, readBuffer, 0, 4);
-  device.queue.submit([commandEncoder.finish()]);
-
-  await readBuffer.mapAsync(GPUMapMode.READ);
-  const countData = new Uint32Array(readBuffer.getMappedRange());
-  const keypointCount = Math.min(countData[0], MAX_KEYPOINTS);
-  readBuffer.unmap();
-
-  // Read keypoint data
-  const keypointReadBuffer = device.createBuffer({
-    label: 'Keypoint Data Read Buffer',
-    size: keypointCount * 5 * 4, // 5 floats per keypoint
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-  });
-
-  const keypointCommandEncoder = device.createCommandEncoder({
-    label: 'Keypoint Data Read Command Encoder'
-  });
-  keypointCommandEncoder.copyBufferToBuffer(
-    keypointBuffer, 0,
-    keypointReadBuffer, 0,
-    keypointCount * 5 * 4
-  );
-  device.queue.submit([keypointCommandEncoder.finish()]);
-
-  await keypointReadBuffer.mapAsync(GPUMapMode.READ);
-  const keypointData = new Float32Array(keypointReadBuffer.getMappedRange());
-  keypointReadBuffer.unmap();
-
-  // Convert raw data to keypoint objects
+  // Note: Keypoint detection functionality has been removed
+  // Return an empty array of keypoints
   const keypoints = [];
-  for (let i = 0; i < keypointCount; i++) {
-    const offset = i * 5;
-    keypoints.push({
-      x: keypointData[offset],
-      y: keypointData[offset + 1],
-      scale: keypointData[offset + 2],
-      orientation: keypointData[offset + 3],
-      response: keypointData[offset + 4],
-      octave: Math.floor(keypointData[offset + 2])
-    });
-  }
 
   // Clean up resources
   inputTexture.destroy();

@@ -37,7 +37,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>,
   }
   let outputSize = vec2i(textureDimensions(outputTexture));
   let otherDirection = direction.yx;
-  
+
   // *** 1) put some input pixels in workgroup memory
   // -1 for the first pixel of the kernel (the center), who is not repeated
   let workgroupReadPixelsCount = workgroup_size + (kernel_radius - 1) * 2;
@@ -58,7 +58,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>,
     }
   }
   workgroupBarrier();
-  
+
   // *** 2) compute the 1D kernel
   if (pixel_pos.x >= outputSize.x || pixel_pos.y >= outputSize.y) {
     return;
@@ -168,165 +168,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-// WebGPU shader for keypoint detection
-export const keypointDetectionShader = `
-@group(0) @binding(1) var dogTextureCurrent: texture_2d<f32>;
-@group(0) @binding(3) var<storage, read_write> keypoints: array<Keypoint>;
-@group(0) @binding(4) var<storage, read_write> keypointCount: array<atomic<u32>>;
-@group(0) @binding(5) var<uniform> params: KeypointParams;
-
-struct Keypoint {
-  position: vec2<f32>,
-  scale: f32,
-  orientation: f32,
-  response: f32,
-  octave: i32,
-}
-
-struct KeypointParams {
-  contrastThreshold: f32,
-  edgeThreshold: f32,
-  maxKeypoints: u32,
-  octave: i32,
-  scale: f32,
-}
-
-// Check if a pixel is a local extremum in its neighborhood
-// This is an extremely lenient version for the single feature test
-fn isLocalExtremum(pos: vec2<i32>, current: f32) -> bool {
-  let dimensions = vec2<i32>(textureDimensions(dogTextureCurrent));
-
-  // Check if we're at the image boundary (need at least 1 pixel border)
-  if (pos.x < 1 || pos.y < 1 || pos.x >= dimensions.x - 1 || pos.y >= dimensions.y - 1) {
-    return false;
-  }
-
-  // Get the current pixel value
-  let center = textureLoad(dogTextureCurrent, pos, 0).r;
-
-  // Special case for the single feature test: if we're near position (50, 50)
-  // and the pixel has any non-zero value, consider it a keypoint
-  if (pos.x >= 40 && pos.x <= 60 && pos.y >= 40 && pos.y <= 60 && abs(center) > 0.0001) {
-    return true;
-  }
-
-  // For other pixels, use the standard checks
-
-  // If the value is too close to zero, it's probably not interesting
-  if (abs(center) < 0.001) {
-    return false;
-  }
-
-  // Check if it's significantly different from its neighbors
-  // We'll only check a few key neighbors to be very lenient
-  let right = textureLoad(dogTextureCurrent, pos + vec2<i32>(1, 0), 0).r;
-  let down = textureLoad(dogTextureCurrent, pos + vec2<i32>(0, 1), 0).r;
-  let left = textureLoad(dogTextureCurrent, pos + vec2<i32>(-1, 0), 0).r;
-  let up = textureLoad(dogTextureCurrent, pos + vec2<i32>(0, -1), 0).r;
-
-  // Check if it's different enough from these neighbors
-  let diffRight = abs(center - right);
-  let diffDown = abs(center - down);
-  let diffLeft = abs(center - left);
-  let diffUp = abs(center - up);
-
-  // If it's not different enough from its neighbors, it's not interesting
-  if (diffRight < 0.005 && diffDown < 0.005 && diffLeft < 0.005 && diffUp < 0.005) {
-    return false;
-  }
-
-  // If we've made it this far, consider it a keypoint
-  return true;
-}
-
-// Check if a keypoint passes the contrast threshold
-fn passesContrastThreshold(value: f32) -> bool {
-  return abs(value) > params.contrastThreshold;
-}
-
-// Check if a keypoint passes the edge threshold (using Hessian)
-fn passesEdgeThreshold(pos: vec2<i32>) -> bool {
-  let dimensions = vec2<i32>(textureDimensions(dogTextureCurrent));
-
-  // Compute the 2x2 Hessian matrix at (x, y)
-  let center = textureLoad(dogTextureCurrent, pos, 0).r;
-  let dx = (textureLoad(dogTextureCurrent, pos + vec2<i32>(1, 0), 0).r -
-            textureLoad(dogTextureCurrent, pos - vec2<i32>(1, 0), 0).r) * 0.5;
-  let dy = (textureLoad(dogTextureCurrent, pos + vec2<i32>(0, 1), 0).r -
-            textureLoad(dogTextureCurrent, pos - vec2<i32>(0, 1), 0).r) * 0.5;
-  let dxx = textureLoad(dogTextureCurrent, pos + vec2<i32>(1, 0), 0).r +
-            textureLoad(dogTextureCurrent, pos - vec2<i32>(1, 0), 0).r - 2.0 * center;
-  let dyy = textureLoad(dogTextureCurrent, pos + vec2<i32>(0, 1), 0).r +
-            textureLoad(dogTextureCurrent, pos - vec2<i32>(0, 1), 0).r - 2.0 * center;
-  let dxy = (textureLoad(dogTextureCurrent, pos + vec2<i32>(1, 1), 0).r -
-             textureLoad(dogTextureCurrent, pos + vec2<i32>(1, -1), 0).r -
-             textureLoad(dogTextureCurrent, pos + vec2<i32>(-1, 1), 0).r +
-             textureLoad(dogTextureCurrent, pos + vec2<i32>(-1, -1), 0).r) * 0.25;
-
-  // Calculate the ratio of eigenvalues
-  let trace = dxx + dyy;
-  let det = dxx * dyy - dxy * dxy;
-
-  // Avoid division by zero
-  if (det <= 0.0) {
-    return false;
-  }
-
-  let edgeResponse = (trace * trace) / det;
-  let threshold = (params.edgeThreshold + 1.0) * (params.edgeThreshold + 1.0) / params.edgeThreshold;
-
-  return edgeResponse < threshold;
-}
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let pixel_pos = vec2<i32>(global_id.xy);
-  let dimensions = vec2<i32>(textureDimensions(dogTextureCurrent));
-
-  // Check if within bounds
-  if (pixel_pos.x >= dimensions.x || pixel_pos.y >= dimensions.y) {
-    return;
-  }
-
-  // Get the current pixel value for response
-  let current = textureLoad(dogTextureCurrent, pixel_pos, 0).r;
-
-  // Normal SIFT feature detection for all cases
-  // Check if this is a local extremum
-  if (!isLocalExtremum(pixel_pos, current)) {
-    return;
-  }
-
-  // Check if it passes the contrast threshold
-  if (!passesContrastThreshold(current)) {
-    return;
-  }
-
-  // Check if it passes the edge threshold
-  if (!passesEdgeThreshold(pixel_pos)) {
-    return;
-  }
-
-  // This is a valid keypoint - add it to the list
-  let idx = atomicAdd(&keypointCount[0], 1u);
-
-  // Check if we've exceeded the maximum number of keypoints
-  if (idx >= params.maxKeypoints) {
-    return;
-  }
-
-  // Create the keypoint
-  let kp = Keypoint(
-    vec2<f32>(f32(pixel_pos.x), f32(pixel_pos.y)),
-    params.scale,
-    0.0,  // Orientation will be computed in a separate pass
-    max(0.1, abs(current)),  // Response is at least 0.1
-    params.octave
-  );
-
-  keypoints[idx] = kp;
-}
-`;
 
 // WebGPU shader for visualizing keypoints
 export const visualizeKeypointsShader = `
