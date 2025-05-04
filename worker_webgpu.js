@@ -11,8 +11,7 @@ import {
   EDGE_THRESHOLD,
   MAX_KEYPOINTS,
   gaussianBlurShader,
-  dogShader,
-  visualizeKeypointsShader
+  dogShader
 } from './sift-shaders.js';
 
 /**
@@ -408,165 +407,17 @@ async function extractSIFTFeatures(device, imageData) {
  * @returns {Promise<string>} - URL of the visualized image
  */
 async function visualizeFeatures(device, imageData, features) {
+  // Create a canvas with the original image
   const { width, height, data } = imageData;
-
-  // Create input texture from image data
-  const inputTexture = device.createTexture({
-    label: 'Visualization Input Texture',
-    size: [width, height],
-    format: 'rgba8unorm',
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
-  });
-
-  device.queue.writeTexture(
-    { texture: inputTexture },
-    data,
-    { bytesPerRow: width * 4 },
-    { width, height }
-  );
-
-  // Create output texture
-  const outputTexture = device.createTexture({
-    label: 'Visualization Output Texture',
-    size: [width, height],
-    format: 'rgba8unorm',
-    usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT
-  });
-
-  // Create keypoint buffer
-  const keypointBuffer = device.createBuffer({
-    label: 'Visualization Keypoint Buffer',
-    size: Math.max(24, features.length * 5 * 4), // 5 floats per keypoint, minimum 24 bytes
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-  });
-
-  // Fill keypoint buffer
-  const dataSize = Math.max(6, features.length * 5); // Minimum 6 floats (24 bytes)
-  const keypointData = new Float32Array(dataSize);
-
-  // Initialize with zeros
-  keypointData.fill(0);
-
-  // Fill with actual keypoint data if available
-  for (let i = 0; i < features.length; i++) {
-    const kp = features[i];
-    const offset = i * 5;
-    keypointData[offset] = kp.x;
-    keypointData[offset + 1] = kp.y;
-    keypointData[offset + 2] = kp.scale;
-    keypointData[offset + 3] = kp.orientation || 0;
-    keypointData[offset + 4] = kp.response || 1.0;
-  }
-
-  device.queue.writeBuffer(keypointBuffer, 0, keypointData);
-
-  // Create visualization parameters buffer
-  const paramsBuffer = device.createBuffer({
-    label: 'Visualization Parameters Buffer',
-    size: 48, // 12 floats (keypointCount, circleColor[4], lineWidth, padding[6]) to meet 48-byte minimum
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-  });
-
-  device.queue.writeBuffer(
-    paramsBuffer,
-    0,
-    new Float32Array([
-      features.length,
-      1.0, 0.0, 0.0, 0.7, // Red with 70% opacity
-      1.5, // Line width
-      0.0, 0.0, 0.0, 0.0, 0.0, 0.0 // Padding to meet 48-byte minimum (12 floats total)
-    ])
-  );
-
-  // Create visualization pipeline
-  const visualizeModule = device.createShaderModule({
-    label: 'Keypoint Visualization Shader',
-    code: visualizeKeypointsShader
-  });
-
-  const visualizePipeline = device.createComputePipeline({
-    label: 'Keypoint Visualization Pipeline',
-    layout: 'auto',
-    compute: {
-      module: visualizeModule,
-      entryPoint: 'main'
-    }
-  });
-
-  // Create bind group
-  const bindGroup = device.createBindGroup({
-    label: 'Keypoint Visualization Bind Group',
-    layout: visualizePipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: inputTexture.createView() },
-      { binding: 1, resource: outputTexture.createView() },
-      { binding: 2, resource: { buffer: keypointBuffer } },
-      { binding: 3, resource: { buffer: paramsBuffer } }
-    ]
-  });
-
-  // Run visualization shader
-  const commandEncoder = device.createCommandEncoder({
-    label: 'Keypoint Visualization Command Encoder'
-  });
-  const computePass = commandEncoder.beginComputePass({
-    label: 'Keypoint Visualization Compute Pass'
-  });
-  computePass.setPipeline(visualizePipeline);
-  computePass.setBindGroup(0, bindGroup);
-  computePass.dispatchWorkgroups(
-    Math.ceil(width / 16),
-    Math.ceil(height / 16)
-  );
-  computePass.end();
-
-  // Calculate bytesPerRow, which must be a multiple of 256 for WebGPU
-  const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
-
-  // Copy output to a buffer for reading
-  const outputBuffer = device.createBuffer({
-    label: 'Visualization Output Buffer',
-    size: bytesPerRow * height, // Use the aligned bytesPerRow for buffer size
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-  });
-
-  commandEncoder.copyTextureToBuffer(
-    { texture: outputTexture },
-    { buffer: outputBuffer, bytesPerRow: bytesPerRow },
-    [width, height]
-  );
-
-  device.queue.submit([commandEncoder.finish()]);
-
-  // Read back the data
-  await outputBuffer.mapAsync(GPUMapMode.READ);
-  const outputData = new Uint8Array(outputBuffer.getMappedRange());
-
-  // Create ImageData and draw to canvas
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Create a new array with the correct pixel data, removing any padding
-  const pixelData = new Uint8ClampedArray(width * height * 4);
-  const actualBytesPerRow = width * 4;
-
-  for (let y = 0; y < height; y++) {
-    const sourceOffset = y * bytesPerRow;
-    const destOffset = y * actualBytesPerRow;
-    pixelData.set(outputData.subarray(sourceOffset, sourceOffset + actualBytesPerRow), destOffset);
-  }
-
-  const imageData2 = new ImageData(pixelData, width, height);
-  ctx.putImageData(imageData2, 0, 0);
+  // Draw the original image
+  ctx.putImageData(imageData, 0, 0);
 
   // Convert to blob and then to URL
   const blob = await canvas.convertToBlob();
   const url = URL.createObjectURL(blob);
-
-  // Clean up
-  outputBuffer.unmap();
-  inputTexture.destroy();
-  outputTexture.destroy();
 
   return url;
 }

@@ -7,43 +7,27 @@ import {
 // Import shared shader code and constants
 import {
   dogShader,
-  radialKernelShader,
-  visualizeKeypointsShader
+  radialKernelShader
 } from './sift-shaders.js'
 
 // Main test function that runs all shader tests
 export async function runShaderTests () {
   console.log('Starting shader unit tests...')
 
-  // Check if WebGPU is supported
-  if (!navigator.gpu) {
-    QUnit.test('WebGPU Support', assert => {
-      assert.ok(false, 'WebGPU not supported on this browser')
-    })
-    return
-  }
-
-  console.log('WebGPU is supported')
+  QUnit.test('WebGPU Support', assert => {
+    assert.ok(navigator.gpu, 'WebGPU not supported on this browser')
+  })
 
   try {
     // Request adapter and device
     const adapter = await navigator.gpu.requestAdapter()
-    if (!adapter) {
-      QUnit.test('WebGPU Adapter', assert => {
-        assert.ok(false, 'No appropriate GPU adapter found')
-      })
-      return
-    }
-
-    console.log('WebGPU adapter obtained:', adapter.name)
-
-    // Request device
+    QUnit.test('WebGPU Adapter', assert => {
+      assert.ok(adapter, 'No appropriate GPU adapter found')
+    })
     const device = await adapter.requestDevice({
       label: 'Shader Test Device',
       requiredFeatures: ['timestamp-query'],
     })
-    console.log('WebGPU device obtained')
-
     QUnit.module('Shader Tests', {
       before: function () {
         console.log('Starting shader tests module')
@@ -56,7 +40,6 @@ export async function runShaderTests () {
     // Run tests for each shader
     await testGaussianBlurShader(device)
     await testDogShader(device)
-    await testVisualizeKeypointsShader(device)
 
   } catch (error) {
     console.error('Error running shader tests:', error)
@@ -534,143 +517,3 @@ export async function testDogShader (device) {
   })
 }
 
-// Test for Visualize Keypoints Shader
-export async function testVisualizeKeypointsShader (device) {
-  console.log('Testing Visualize Keypoints Shader...')
-
-  // Create QUnit test
-  QUnit.test('Visualize Keypoints Shader', async assert => {
-    try {
-      // Create shader module
-      const visualizeModule = device.createShaderModule({
-        label: 'Visualize Keypoints Shader Test',
-        code: visualizeKeypointsShader
-      })
-
-      // Create compute pipeline
-      const visualizePipeline = device.createComputePipeline({
-        label: 'Visualize Keypoints Pipeline Test',
-        layout: 'auto',
-        compute: {
-          module: visualizeModule,
-          entryPoint: 'main'
-        }
-      })
-
-      // Test 1: Verify shader compilation
-      assert.ok(visualizePipeline, 'Shader compiled successfully')
-
-      // Test 2: Verify keypoint visualization
-      const width = 32
-      const height = 32
-
-      // Create input texture (plain white)
-      const inputTexture = device.createTexture({
-        size: [width, height],
-        format: 'rgba8unorm',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
-      })
-
-      const inputData = new Uint8Array(width * height * 4)
-      inputData.fill(255) // Fill with white
-
-      device.queue.writeTexture(
-        {texture: inputTexture},
-        inputData,
-        {bytesPerRow: width * 4},
-        [width, height]
-      )
-
-      // Create output texture
-      const outputTexture = device.createTexture({
-        size: [width, height],
-        format: 'rgba8unorm',
-        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC
-      })
-
-      // Create keypoint buffer with a single keypoint in the center
-      const keypointBuffer = device.createBuffer({
-        size: 24, // At least 24 bytes (6 floats)
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-      })
-
-      const keypointData = new Float32Array([
-        width / 2, height / 2, // position
-        3.0,                   // scale
-        0.0,                   // orientation
-        1.0,                   // response
-        0                      // octave
-      ])
-
-      device.queue.writeBuffer(keypointBuffer, 0, keypointData)
-
-      // Create params buffer
-      const paramsBuffer = device.createBuffer({
-        size: 48, // 12 floats (keypointCount, circleColor[4], lineWidth, padding[6])
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-      })
-
-      device.queue.writeBuffer(
-        paramsBuffer,
-        0,
-        new Float32Array([
-          1, // keypointCount
-          1.0, 0.0, 0.0, 0.7, // Red with 70% opacity
-          1.5, // Line width
-          0.0, 0.0, 0.0, 0.0, 0.0, 0.0 // Padding
-        ])
-      )
-
-      // Create bind group
-      const bindGroup = device.createBindGroup({
-        layout: visualizePipeline.getBindGroupLayout(0),
-        entries: [
-          {binding: 0, resource: inputTexture.createView()},
-          {binding: 1, resource: outputTexture.createView()},
-          {binding: 2, resource: {buffer: keypointBuffer}},
-          {binding: 3, resource: {buffer: paramsBuffer}}
-        ]
-      })
-
-      // Run the shader
-      const commandEncoder = device.createCommandEncoder()
-      const computePass = commandEncoder.beginComputePass()
-      computePass.setPipeline(visualizePipeline)
-      computePass.setBindGroup(0, bindGroup)
-      computePass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16))
-      computePass.end()
-      device.queue.submit([commandEncoder.finish()])
-
-      // For this test, we'll just verify that the shader runs without errors
-      // The actual visualization is difficult to test reliably across different WebGPU implementations
-      // We'll skip reading back the texture data to avoid potential issues with buffer validation
-
-      console.log('Visualize Keypoints shader executed successfully')
-
-      // Note: We're not reading back the texture data to avoid potential issues with buffer validation
-      // This is a common source of errors in WebGPU tests, especially when running in different environments
-
-      // Define these variables for compatibility with the rest of the code
-      Math.floor(width / 2)
-      Math.floor(height / 2)
-      // scale * 2.0 as per the shader
-
-      // Consider the test passed if the shader compiled and ran
-      assert.ok(true, 'Shader executed successfully')
-
-      // Create ImageData object for the input image
-      const inputImageData = new ImageData(new Uint8ClampedArray(inputData), width, height)
-
-      // Display input image for this assertion
-      assert.imageTest(inputImageData, null, 'Visualize Keypoints: Input image (plain white with keypoint)', true)
-
-      // Clean up
-      inputTexture.destroy()
-      outputTexture.destroy()
-
-    } catch (error) {
-      console.error('Error testing Visualize Keypoints Shader:', error)
-      assert.ok(false, `Error testing Visualize Keypoints Shader: ${error.message}`)
-    }
-  })
-}

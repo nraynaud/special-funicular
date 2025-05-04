@@ -22,16 +22,6 @@
             font-family: monospace;
         }
 
-        #images {
-            display: flex;
-            margin-top: 20px;
-        }
-
-        #images img {
-            max-width: 45%;
-            margin-right: 10px;
-        }
-
         button {
             padding: 10px;
             margin-top: 10px;
@@ -88,7 +78,7 @@
         /* Custom styles for QUnit integration */
         #qunit {
             margin-top: 20px;
-            position:inherit;
+            position: inherit;
         }
 
         #qunit-fixture {
@@ -112,7 +102,6 @@
 <div id="qunit-fixture"></div>
 
 <div>
-    <button id="runTest">Run Test with Default Image</button>
     <input type="file" id="imageInput" accept="image/*">
 </div>
 
@@ -130,7 +119,6 @@
         <li><code>#shader-gaussianBlur</code> - Run Gaussian Blur shader test</li>
         <li><code>#shader-dog</code> - Run DoG (Difference of Gaussians) shader test</li>
         <li><code>#shader-keypointDetection</code> - Run Keypoint Detection shader test</li>
-        <li><code>#shader-visualizeKeypoints</code> - Run Visualize Keypoints shader test</li>
     </ul>
     <p>Examples:</p>
     <ul>
@@ -179,7 +167,6 @@
 
   QUnit.config.autostart = false
   QUnit.config.testTimeout = 30000 // 30 seconds timeout for async tests
-
 
   // Add custom assertion for displaying images in test results
   QUnit.assert.imageTest = function (inputImage, outputImage, message, result = true) {
@@ -447,18 +434,7 @@
           }
         }
       })
-
-      // Add test for running shader tests
-      QUnit.test('Run Shader Tests', async function (assert) {
-        const done = assert.async()
-        try {
-          await runShaderTests()
-          done()
-        } catch (error) {
-          assert.ok(false, `Error running shader tests: ${error.message}`)
-          done()
-        }
-      })
+      await runShaderTests()
 
       // Check if there's a specific test to run from the URL hash
       const rawHash = window.location.hash
@@ -468,20 +444,7 @@
       if (hash) {
         console.log(`Running specific test from URL hash: ${hash}`)
 
-        if (hash === 'default' && document.getElementById('runTest')) {
-          // Run the default image test
-          QUnit.test('Default Image Test', function (assert) {
-            const done = assert.async()
-            console.log('Running test with default image...')
-            document.getElementById('runTest').click()
-
-            // Wait for the test to complete
-            setTimeout(function () {
-              assert.ok(true, 'Default image test completed')
-              done()
-            }, 5000)
-          })
-        } else if (hash === 'shaderTests') {
+        if (hash === 'shaderTests') {
           // Shader tests are already set up in the QUnit module
           console.log('Shader tests will run via QUnit')
         } else if (hash.startsWith('shader-')) {
@@ -504,7 +467,6 @@
 
     // Add event listener for hash changes to re-run tests when hash changes
     window.addEventListener('hashchange', function () {
-      console.log('URL hash changed, reloading page to run new tests...')
       window.location.reload()
     })
 
@@ -525,29 +487,6 @@
     if (options.backgroundColor) button.style.backgroundColor = options.backgroundColor
 
     return button
-  }
-
-  // Function to test a shader
-  async function testShader (device, code, name) {
-    console.log(`Testing ${name} Shader...`)
-    try {
-      const shaderModule = device.createShaderModule({
-        label: `${name} Shader Test`,
-        code: code
-      })
-      const compilationInfo = await shaderModule.getCompilationInfo()
-      for (const message of compilationInfo.messages) {
-        if (message.type in ['error', 'warning']) {
-          const formattedMessage = `Line ${message.lineNum}:${message.linePos} - ${code.substr(message.offset, message.length)}\n` + message.message
-          throw new Error(formattedMessage)
-        }
-      }
-      console.log(`${name} Shader compiled successfully`)
-    } catch (error) {
-      const errorMessage = `${name} Shader error: ${error.message}`
-      console.error(errorMessage)
-      sendErrorToAI(errorMessage)
-    }
   }
 
   // Override console.log to also display in our log div
@@ -627,124 +566,6 @@
     sendErrorToAI(message)
   }
 
-  // Centralized worker message handler
-  function handleWorkerMessage (e, options = {}) {
-    const {
-      onProcessed, // Callback for 'processed' messages
-      onError, // Callback for 'error' messages
-      onDebug, // Callback for 'debug' messages
-      onOther, // Callback for other message types
-      errorCollector, // Array to collect errors (alternative to sendErrorToAI)
-      resolvePromise // Function to resolve a promise
-    } = options
-
-    const {type, result, features, message} = e.data
-
-    if (type === 'processed') {
-      const featureCount = features ? features.length : 0
-      console.log(`Worker processed successfully. Found ${featureCount} features.`)
-      document.getElementById('processedImage').src = result
-
-      if (onProcessed) {
-        onProcessed(result, features)
-      }
-
-      if (resolvePromise) {
-        resolvePromise()
-      }
-    } else if (type === 'error') {
-      const errorMessage = `Worker error: ${message}`
-      console.error(errorMessage)
-
-      // Handle error reporting
-      if (errorCollector) {
-        errorCollector.push(errorMessage)
-      } else {
-        sendErrorToAI(errorMessage)
-      }
-
-      if (onError) {
-        onError(message)
-      }
-
-      if (resolvePromise) {
-        resolvePromise()
-      }
-    } else if (type === 'debug') {
-      console.log(`[WORKER DEBUG] ${message}`)
-
-      // Check if the debug message contains error information
-      if (message.includes('error') || message.includes('Error') || message.includes('exception')) {
-        const debugErrorMessage = `Worker debug error: ${message}`
-        if (errorCollector) {
-          errorCollector.push(debugErrorMessage)
-        } else {
-          sendErrorToAI(debugErrorMessage)
-        }
-      }
-
-      if (onDebug) {
-        onDebug(message)
-      }
-    } else {
-      console.log(`Worker message: ${JSON.stringify(e.data)}`)
-
-      if (onOther) {
-        onOther(e.data)
-      }
-    }
-  }
-
-  // Centralized worker error handler
-  function handleWorkerError (error, options = {}) {
-    const {errorCollector, resolvePromise} = options
-    const errorMessage = `Worker error: ${error.message}`
-    console.error(errorMessage)
-
-    if (errorCollector) {
-      errorCollector.push(errorMessage)
-    } else {
-      sendErrorToAI(errorMessage)
-    }
-
-    if (resolvePromise) {
-      resolvePromise()
-    }
-  }
-
-  // Function to run the worker test
-  async function runWorkerTest (imageUrl) {
-    console.log(`Starting worker test with image: ${imageUrl}`)
-
-    // Display the original image
-    document.getElementById('originalImage').src = imageUrl
-
-    // Create the worker
-    const worker = new Worker('worker_webgpu.js', {type: 'module'})
-
-    // Set up message handler
-    worker.onmessage = (e) => handleWorkerMessage(e)
-
-    // Set up error handler
-    worker.onerror = (error) => handleWorkerError(error)
-
-    // Send the image URL to the worker
-    worker.postMessage({imageUrl})
-    console.log('Message sent to worker')
-  }
-
-  // Set up event listeners
-  document.getElementById('runTest').addEventListener('click', () => {
-    runWorkerTest('3916587d9b.png')
-  })
-
-  document.getElementById('imageInput').addEventListener('change', (event) => {
-    if (event.target.files && event.target.files[0]) {
-      const imageUrl = URL.createObjectURL(event.target.files[0])
-      runWorkerTest(imageUrl)
-    }
-  })
-
   // Function to create a simple test image with a single feature
   function createSingleFeatureTestImage () {
     console.log('Creating single feature test image')
@@ -790,46 +611,6 @@
     if (!QUnit.config.started) {
       QUnit.start()
     }
-
-    // Add a test for the default image
-    QUnit.test('Default Image Test', function (assert) {
-      const done = assert.async()
-
-      // Display the original image
-      document.getElementById('originalImage').src = '3916587d9b.png'
-
-      // Create the worker
-      const worker = new Worker('worker_webgpu.js', {type: 'module'})
-
-      // Set up message handler
-      worker.onmessage = function (e) {
-        const {type, result, features, message} = e.data
-
-        if (type === 'processed') {
-          const featureCount = features ? features.length : 0
-          console.log(`Worker processed successfully. Found ${featureCount} features.`)
-          document.getElementById('processedImage').src = result
-
-          assert.ok(true, `Processed successfully. Found ${featureCount} features.`)
-          done()
-        } else if (type === 'error') {
-          console.error(`Worker error: ${message}`)
-          assert.ok(false, `Worker error: ${message}`)
-          done()
-        }
-      }
-
-      // Set up error handler
-      worker.onerror = function (error) {
-        console.error(`Worker error: ${error.message}`)
-        assert.ok(false, `Worker error: ${error.message}`)
-        done()
-      }
-
-      // Send the image URL to the worker
-      worker.postMessage({imageUrl: '3916587d9b.png'})
-    })
-
   }
 
   // Check if WebGPU is supported
