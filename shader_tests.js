@@ -7,7 +7,6 @@ import {
 // Import shared shader code and constants
 import {
   dogShader,
-  radialKernelShader
 } from './sift-shaders.js'
 
 // Main test function that runs all shader tests
@@ -135,22 +134,16 @@ export async function testGaussianBlurShader (device) {
 
   QUnit.test('Gaussian Blur Shader', async assert => {
     try {
-      // Create shader module
-      const gaussianModule = device.createShaderModule({
-        label: 'Gaussian Blur Shader Test',
-        code: radialKernelShader
-      })
-
-      const defs = makeShaderDataDefinitions(radialKernelShader)
+      const shaderCode = await (await fetch('radial.wgsl')).text()
+      const defs = makeShaderDataDefinitions(shaderCode)
 
       console.log('DEFINITIONS', defs)
 
-      // Create compute pipeline
+      // partial pipeline to generate layout
       const pipelineDesc = {
         label: 'Gaussian Blur Pipeline Test',
         layout: 'auto',
         compute: {
-          module: gaussianModule,
           entryPoint: 'main',
           constants: {
             kernel_radius: kernelRadius,
@@ -159,7 +152,22 @@ export async function testGaussianBlurShader (device) {
         }
       }
       const descriptors = makeBindGroupLayoutDescriptors(defs, pipelineDesc)
+      const bindGroupLayouts = descriptors.map(d => device.createBindGroupLayout(d))
+      const pipelineLayout = device.createPipelineLayout({bindGroupLayouts: bindGroupLayouts})
       console.log('LAYOUTS', descriptors)
+      // Create shader module
+      const gaussianModule = device.createShaderModule({
+        label: 'Gaussian Blur Shader Test',
+        code: shaderCode,
+        hints: [{
+          'main': pipelineLayout
+        }]
+      })
+      const info = await gaussianModule.getCompilationInfo()
+      assert.equal(info.messages.length, 0, 'compilation produces no message')
+      // finish populating pipeline to actually create it
+      pipelineDesc.compute.module = gaussianModule
+      pipelineDesc.layout = pipelineLayout
       const gaussianPipeline = device.createComputePipeline(pipelineDesc)
 
       // Test shader compilation
@@ -192,26 +200,40 @@ export async function testGaussianBlurShader (device) {
       }
 
       const inputTexture = createTextureFromSource(device, inputImage)
+      const octaves = Math.ceil(Math.log2(Math.min(width, height)) - 1)
       // Create output texture with additional usage flags
       const outputTexture = device.createTexture({
-        size: [width, height],
+        size: [width, height, 2],
+        mipLevelCount: octaves,
         format: 'rgba8unorm',
-        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING
       })
-
+      const sampler = device.createSampler({
+        magFilter: 'linear',
+        minFilter: 'linear',
+        addressModeU: 'clamp-to-edge',
+        addressModeV: 'clamp-to-edge'
+      })
       // We don't need to initialize the output texture, the shader will write to it
       console.log('Output texture created but not initialized')
       const directionView = makeStructuredView(defs.uniforms.horizontal)
 
-      // Create uniform buffer for Gaussian parameters (horizontal pass)
-      const paramsBuffer = device.createBuffer({
+      const horizontalParam = device.createBuffer({
         size: directionView.arrayBuffer.byteLength,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       })
+      directionView.set(1)
+      device.queue.writeBuffer(horizontalParam, 0, directionView.arrayBuffer)
+      const verticalParam = device.createBuffer({
+        size: directionView.arrayBuffer.byteLength,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      })
+      directionView.set(0)
+      device.queue.writeBuffer(verticalParam, 0, directionView.arrayBuffer)
 
-      async function runShader (gaussianPipeline, bindGroup, width, height, outputTexture, horizontal) {
-        directionView.set(horizontal)
-        device.queue.writeBuffer(paramsBuffer, 0, directionView.arrayBuffer)
+      async function runShader (gaussianPipeline, width, height, horizontal = null, outputOrigin = [0, 0, 0]) {
+        const callHorizontal = horizontal !== 0 || horizontal === null
+        const callVertical = horizontal === 0 || horizontal === null
         // Calculate bytesPerRow, which must be a multiple of 256 for WebGPU
         const bytesPerRow = Math.ceil((width * 4) / 256) * 256
         // Create a buffer to copy the texture data to
@@ -233,8 +255,11 @@ export async function testGaussianBlurShader (device) {
         })
 
         const commandEncoder = device.createCommandEncoder()
+        const horizontalWorkGroups = [Math.ceil(width / workgroupSize), height]
+        const verticalWorkGroups = [Math.ceil(height / workgroupSize), width]
+
         const computePass = commandEncoder.beginComputePass({
-          label: 'Gussian compute pass',
+          label: 'Gaussian compute pass',
           timestampWrites: {
             querySet,
             beginningOfPassWriteIndex: 0,
@@ -242,12 +267,17 @@ export async function testGaussianBlurShader (device) {
           },
         })
         computePass.setPipeline(gaussianPipeline)
-        computePass.setBindGroup(0, bindGroup)
-        const workGroups = horizontal ? [Math.ceil(width / workgroupSize), height] : [Math.ceil(height / workgroupSize), width]
-        computePass.dispatchWorkgroups(...workGroups)
+        if (callHorizontal) {
+          computePass.setBindGroup(0, horizontalBindGroup)
+          computePass.dispatchWorkgroups(...horizontalWorkGroups)
+        }
+        if (callVertical) {
+          computePass.setBindGroup(0, verticalBindGroup)
+          computePass.dispatchWorkgroups(...verticalWorkGroups)
+        }
         computePass.end()
         commandEncoder.copyTextureToBuffer(
-          {texture: outputTexture},
+          {texture: outputTexture, origin: outputOrigin},
           {buffer: outputBuffer, bytesPerRow},
           [width, height]
         )
@@ -286,19 +316,39 @@ export async function testGaussianBlurShader (device) {
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       })
       device.queue.writeBuffer(kernelBuffer, 0, quenelle)
-      const bindGroup = device.createBindGroup({
-        label: 'Gauss bind group 0',
+      const horizontalBindGroup = device.createBindGroup({
+        label: 'Gauss horizontal bind group 0',
         layout: gaussianPipeline.getBindGroupLayout(0),
         entries: [
-          {binding: 0, resource: outputTexture.createView()},
+          {
+            binding: 0,
+            resource: outputTexture.createView({dimension: '2d', mipLevelCount: 1, baseMipLevel: 0, baseArrayLayer: 0})
+          },
+          {binding: 1, resource: sampler},
           {binding: 2, resource: inputTexture.createView()},
-          {binding: 3, resource: {buffer: paramsBuffer}},
+          {binding: 3, resource: {buffer: horizontalParam}},
           {binding: 4, resource: {buffer: kernelBuffer}},
         ]
       })
-
+      const verticalBindGroup = device.createBindGroup({
+        label: 'Gauss vertical bind group 0',
+        layout: gaussianPipeline.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: outputTexture.createView({dimension: '2d', mipLevelCount: 1, baseMipLevel: 0, baseArrayLayer: 1})
+          },
+          {binding: 1, resource: sampler},
+          {
+            binding: 2,
+            resource: outputTexture.createView({dimension: '2d', mipLevelCount: 1, baseMipLevel: 0, baseArrayLayer: 0})
+          },
+          {binding: 3, resource: {buffer: verticalParam}},
+          {binding: 4, resource: {buffer: kernelBuffer}},
+        ]
+      })
       // Run the shader
-      let outputData = await runShader(gaussianPipeline, bindGroup, width, height, outputTexture, 1)
+      let outputData = await runShader(gaussianPipeline, width, height, 1)
 
       // Test horizontal blur
       let whiteRowUntouched = true
@@ -330,7 +380,14 @@ export async function testGaussianBlurShader (device) {
       assert.imageTest(inputImage, outputImage, 'Horizontal blur: Input and output images', grayRowDetected)
 
       // Vertical test
-      outputData = await runShader(gaussianPipeline, bindGroup, width, height, outputTexture, 0)
+      device.queue.writeTexture({
+        texture: outputTexture,
+        origin: [0, 0, 0]
+      }, inputImage.data, {
+        bytesPerRow: 4 * inputImage.width,
+        rowsPerImage: inputImage.height
+      }, [inputImage.width, inputImage.height, 1])
+      outputData = await runShader(gaussianPipeline, width, height, 0, [0, 0, 1])
       let whiteColumnUntouched = true
       for (let y = 0; y < height; y++) {
         let x = 0 //first column should be white
@@ -352,12 +409,11 @@ export async function testGaussianBlurShader (device) {
       // Display input and output images for this assertion
       assert.imageTest(inputImage, outputImage, 'Vertical blur: Input and output images', grayColumnDetected)
 
-      // Clean up resources
-      paramsBuffer.destroy()
+      await runShader(gaussianPipeline, width, height, null, [0, 0, 1])
+      assert.imageTest(inputImage, outputImage, 'Blur, running both passes', whiteColumnUntouched)
       kernelBuffer.destroy()
       inputTexture.destroy()
       outputTexture.destroy()
-
     } catch (error) {
       console.error('Error testing Gaussian Blur Shader:', error)
       assert.ok(false, `Error testing Gaussian Blur Shader: ${error.message}`)
@@ -456,8 +512,8 @@ export async function testDogShader (device) {
       // Run the shader
       const commandEncoder = device.createCommandEncoder()
       const computePass = commandEncoder.beginComputePass()
-      computePass.setPipeline(dogPipeline)
       computePass.setBindGroup(0, bindGroup)
+      computePass.setPipeline(dogPipeline)
       computePass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16))
       computePass.end()
       device.queue.submit([commandEncoder.finish()])
