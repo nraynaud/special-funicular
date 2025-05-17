@@ -169,20 +169,10 @@
   QUnit.config.testTimeout = 30000 // 30 seconds timeout for async tests
 
   // Add custom assertion for displaying images in test results
-  QUnit.assert.imageTest = function (inputImage, outputImage, message, result = true) {
+  QUnit.assert.imageTest = async function (inputImage, outputImage, message, result = true) {
     // Get the current test's assertion list element
     const assertionList = document.getElementById('qunit-test-output-' + QUnit.config.current.testId)
       .querySelector('.qunit-assert-list')
-
-    // Create a new list item for this assertion
-    const listItem = document.createElement('li')
-    listItem.className = result ? 'pass' : 'fail'
-
-    // Add the message
-    const messageSpan = document.createElement('span')
-    messageSpan.className = 'test-message'
-    messageSpan.textContent = message
-    listItem.appendChild(messageSpan)
 
     // Create a container for the images
     const imageContainer = document.createElement('div')
@@ -192,19 +182,16 @@
 
     // Add the input image
     if (inputImage) {
-      addImageToTest(imageContainer, inputImage, 'Input Image')
+      await addImageToTest(imageContainer, inputImage, 'Input Image')
     }
 
     // Add the output image
     if (outputImage) {
-      addImageToTest(imageContainer, outputImage, 'Output Image')
+      await addImageToTest(imageContainer, outputImage, 'Output Image')
     }
 
-    // Add the image container to the list item
-    listItem.appendChild(imageContainer)
-
     // Add the list item to the assertion list
-    assertionList.appendChild(listItem)
+    assertionList.appendChild(imageContainer)
 
     // Push the result to QUnit
     this.pushResult({
@@ -226,20 +213,25 @@
   }
 
   // Function to display images in QUnit output
-  function addImageToTest (container, imageData, label) {
-    if (imageData instanceof ImageData) {
+  async function addImageToTest (container, imageData, label) {
+    if (imageData instanceof ImageData || imageData instanceof ImageBitmap) {
       const canvasElement = document.createElement('canvas')
       canvasElement.width = imageData.width
       canvasElement.height = imageData.height
       const ctx = canvasElement.getContext('2d')
-      ctx.putImageData(imageData, 0, 0)
+      if (imageData instanceof ImageData) {
+        ctx.putImageData(imageData, 0, 0)
+      }
+      if (imageData instanceof ImageBitmap) {
+        ctx.drawImage(imageData, 0, 0)
+      }
 
-      const url = canvasElement.toDataURL()
-      const img = document.createElement('img')
-      img.src = url
+      const img = canvasElement
       img.className = 'test-image'
-      img.title = 'Click to enlarge'
-      img.onclick = function () { showImageModal(this.src) }
+      canvasElement.toBlob(blob => {
+        img.title = 'Click to enlarge'
+        img.onclick = () => { showImageModal(URL.createObjectURL(blob))}
+      })
 
       const imgContainer = document.createElement('div')
       imgContainer.style.marginTop = '10px'
