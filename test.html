@@ -131,33 +131,24 @@
 <h3>Debug Log</h3>
 <div id="log"></div>
 
-<!-- Modal for enlarged images -->
 <div id="imageModal" class="image-modal">
     <span class="close-modal">&times;</span>
-    <img class="modal-content" id="enlargedImage">
+    <canvas class="modal-content" id="enlargedImage"></canvas>
 </div>
-
 <script src="https://code.jquery.com/qunit/qunit-2.19.4.js"></script>
-
-<!-- No need to load shader code and tests as ES modules here anymore.
-     Each function that needs them will import them directly. -->
-
 <script type="module">
   // Import all modules at the top level
 
+  console.log('starting ...')
   import {
     runShaderTests
   } from './shader_tests.js'
 
-  // Script to run the WebGPU SIFT tests
-  // This script will be included in test.html to automatically run the tests
-
-  // Image modal functionality
-  function showImageModal (imgSrc) {
+  function showImageModal (data) {
     const modal = document.getElementById('imageModal')
-    const modalImg = document.getElementById('enlargedImage')
+    const canvas = document.getElementById('enlargedImage')
     modal.style.display = 'block'
-    modalImg.src = imgSrc
+    showInCanvas(canvas, data)
   }
 
   function closeImageModal () {
@@ -202,13 +193,15 @@
     })
   }
 
-  // Simple image comparison function (placeholder)
-  function compareImages (actual, expected) {
-    // In a real implementation, this would do pixel-by-pixel comparison
-    return {
-      equal: true, // Simplified for now
-      actual: 'actual image data',
-      expected: 'expected image data'
+  function showInCanvas (canvasElement, imageData) {
+    canvasElement.width = imageData.width
+    canvasElement.height = imageData.height
+    const ctx = canvasElement.getContext('2d')
+    if (imageData instanceof ImageData) {
+      ctx.putImageData(imageData, 0, 0)
+    }
+    if (imageData instanceof ImageBitmap) {
+      ctx.drawImage(imageData, 0, 0)
     }
   }
 
@@ -218,19 +211,13 @@
       const canvasElement = document.createElement('canvas')
       canvasElement.width = imageData.width
       canvasElement.height = imageData.height
-      const ctx = canvasElement.getContext('2d')
-      if (imageData instanceof ImageData) {
-        ctx.putImageData(imageData, 0, 0)
-      }
-      if (imageData instanceof ImageBitmap) {
-        ctx.drawImage(imageData, 0, 0)
-      }
+      showInCanvas(canvasElement, imageData)
 
       const img = canvasElement
       img.className = 'test-image'
       canvasElement.toBlob(blob => {
         img.title = 'Click to enlarge'
-        img.onclick = () => { showImageModal(URL.createObjectURL(blob))}
+        img.onclick = () => { showImageModal(imageData)}
       })
 
       const imgContainer = document.createElement('div')
