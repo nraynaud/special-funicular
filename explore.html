@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title></title>
+
+    <link href="./lib/clusterize.css" rel="stylesheet">
+    <style>
+        body, html {
+            width: 100%;
+            height: 100vh;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-flow: column nowrap;
+        }
+
+        #wholeApp {
+            min-height: 0;
+            flex-grow: 1;
+            flex-shrink: 1;
+            display: flex;
+            flex-flow: row nowrap;
+            margin: 0;
+            padding: 0;
+        }
+
+        #explore {
+            min-width: 300px;
+            margin: 0;
+            flex: 1 1;
+            overflow: auto;
+        }
+
+        #detail {
+            flex: 3;
+            display: flex;
+            flex-flow: column nowrap;
+        }
+
+        .displayedimg {
+            width: 100%;
+            height: auto;
+        }
+
+        .htmlframe {
+            width: 100%;
+            height: 100%;
+        }
+
+        .clusterize {
+            flex: 1 1;
+            display: flex;
+            flex-flow: column nowrap;
+        }
+
+        .clusterize-scroll {
+            flex: 2 2;
+            max-height: none;
+        }
+
+        h1 {
+            margin: 0;
+            padding: 10px;
+        }
+
+        li.active {
+            background-color: #a0a0ff;
+            color: #000;
+            font-weight: bold;
+        }
+
+        table {
+            border-collapse: collapse;
+        }
+
+        td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        th {
+            /*   position: sticky;*/
+            writing-mode: sideways-lr;
+            text-orientation: mixed;
+            z-index: 100;
+            background-color: green;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+
+        .thead {
+            flex: 0 1;
+        }
+    </style>
+</head>
+<body>
+<h1>Explore</h1>
+<div id="wholeApp">
+    <div id="explore" ondrop="dropHandler(event);" ondragover="dragOverHandler(event);">
+        test
+    </div>
+    <div id="detail">
+
+    </div>
+</div>
+
+<script src="./lib/clusterize.js"></script>
+<script>
+  const explore = document.getElementById('explore')
+  const detail = document.getElementById('detail')
+  let FILES = {}
+
+  async function readDir (entry) {
+    const dirReader = entry.createReader()
+    const entries = []
+    while (true) {
+      const results = await new Promise((resolve, reject) => {
+        dirReader.readEntries(resolve, reject)
+      })
+
+      if (!results.length) {
+        break
+      }
+
+      for (const entry of results) {
+        entries.push(entry)
+      }
+    }
+    return entries
+  }
+
+  function parseCSV (content) {
+    const result = []
+    const lines = content.split('\n')
+    for (const line of lines) {
+      const fields = line.split(',').map(f => f.trim())
+      result.push(fields)
+    }
+    return result
+  }
+
+  function parsePDS (content) {
+    const MULTILINE_MARKERS = {
+      '"': '"',
+      '{': '}',
+      '(': ')'
+    }
+    console.assert(content.startsWith('PDS_VERSION_ID'))
+    const lines = content.split('\n')
+    const objStack = []
+    let currentObject = {}
+    console.log('in parser')
+    while (lines.length > 0) {
+      const line = lines.shift().trim()
+      if (!line.length) {
+        continue
+      }
+      let [key, value] = line.split('=').map(e => e.trim())
+
+      if (key === 'END')
+        return currentObject
+      if (value[0] in MULTILINE_MARKERS) {
+        const closing = MULTILINE_MARKERS[value[0]]
+        if (!(value.length > 1 && value.endsWith(closing))) {
+          const multilinesValue = [value]
+          do {
+            multilinesValue.push(lines.shift().trimEnd()) // leave indentation alone
+          } while (!multilinesValue[multilinesValue.length - 1].endsWith(closing))
+          value = multilinesValue.join('\n')
+        }
+        value = value.slice(1, value.length - 1) //remove quotes
+      }
+      if (key === 'OBJECT') {
+        const newObj = {}
+        if (!(value in currentObject)) {
+          currentObject[value] = []
+        }
+        currentObject[value].push(newObj)
+        objStack.push(currentObject)
+        currentObject = newObj
+      } else {
+        if (key === 'END_OBJECT') {
+          currentObject = objStack.pop()
+        } else {
+          currentObject[key] = value
+        }
+      }
+    }
+  }
+
+  function generateHtmlTable (data, labelDict) {
+    const div = document.createElement('div')
+    div.classList.add('clusterize')
+    const table = document.createElement('table')
+    const thead = document.createElement('thead')
+    thead.classList.add('thead')
+    let columnArray = null
+    if (labelDict) {
+      columnArray = []
+      console.log('data', data[3])
+      for (const col of data[3]) {
+        columnArray.push(labelDict[col])
+      }
+    }
+    for (const row of data.slice(0, 4)) {
+      const tr = document.createElement('tr')
+      for (const [idx, cell] of row.entries()) {
+        const th = document.createElement('th')
+        th.textContent = cell
+        th.title = columnArray[idx]
+        tr.appendChild(th)
+      }
+      thead.appendChild(tr)
+    }
+    table.appendChild(thead)
+    const scrollDiv = document.createElement('div')
+    scrollDiv.classList.add('clusterize-scroll')
+    scrollDiv.id = 'scrollArea'
+    div.appendChild(scrollDiv)
+    const contentTable = table
+    const tbody = document.createElement('tbody')
+    tbody.id = 'contentArea'
+    tbody.classList.add('clusterize-content')
+    const createCol = data => `<td>${data}</td>`
+    const createRow = row => `<tr>${row.map(createCol).join('')}</tr>`
+    for (const row of data.slice(4)) {
+      const tr = document.createElement('tr')
+      for (const [idx, cell] of row.entries()) {
+        const td = document.createElement('td')
+        td.textContent = cell
+        tr.appendChild(td)
+      }
+      tbody.appendChild(tr)
+    }
+    contentTable.appendChild(tbody)
+    scrollDiv.appendChild(contentTable)
+
+    div.appendChild(table)
+    div.afterInsert = () => {
+      const clusterize = new Clusterize({
+        scrollId: 'scrollArea',
+        contentId: 'contentArea'
+      })
+    }
+    return div
+  }
+
+  async function parseFile (hash) {
+    const entry = FILES[hash]
+    if (!entry) {
+      return 'couldn\'t parse file :('
+    }
+    const extension = '.' + entry.name.split('.').pop()
+    if (['.txt', '.ct', '.at', '.nat', '.rt', '.pef'].includes(extension)) {
+      return await entry.file.text()
+    }
+    if (['.lbl', '.cat'].includes(extension)) {
+      console.log('parsing ', entry.name)
+      return JSON.stringify(parsePDS(await entry.file.text()), null, 2)
+    }
+    if (['.gif', '.jpg'].includes(extension)) {
+      const img = document.createElement('img')
+      img.classList.add('displayedimg')
+      img.src = URL.createObjectURL(entry.file)
+      img.alt = entry.name
+      return img
+    }
+    if (['.html', '.htm', '.pdf'].includes(extension)) {
+      const url = URL.createObjectURL(entry.file)
+      const frame = document.createElement('iframe')
+      frame.src = url
+      frame.classList.add('htmlframe')
+      return frame
+    }
+    if (extension === '.csv') {
+      let labelFileName = hash.slice(0, -4) + '.lbl'
+      console.log('labelFileName', labelFileName)
+      const labelFileEntry = FILES[labelFileName]
+      console.log('labelFileEntry', labelFileEntry)
+      let labelDict = {}
+      if (labelFileEntry) {
+        const labels = parsePDS(await labelFileEntry.file.text())
+        console.log('labels', labels)
+        const colLabels = labels['UNCOMPRESSED_FILE'].find((o) => 'TABLE' in o)['TABLE'][0]['COLUMN']
+        console.log('colLabels', colLabels)
+        for (const colLabel of colLabels) {
+          labelDict[colLabel.NAME] = JSON.stringify(colLabel, null, 2)
+        }
+
+      }
+      return generateHtmlTable(parseCSV(await entry.file.text()), labelDict)
+    }
+  }
+
+  async function dropHandler (ev) {
+    console.log('File(s) dropped', [...ev.dataTransfer.items].map(i => ({
+      type: i.type,
+      kind: i.kind
+    })), ev.dataTransfer.types.slice(), [...ev.dataTransfer.files])
+
+    if (ev.dataTransfer.types.includes('text/uri-list')) {
+      let uri = ev.dataTransfer.getData('text/uri-list')
+      console.log('uri', uri)
+      const res = await fetch(uri)
+      const text = await res.text()
+      console.log(text)
+    }
+
+    ev.preventDefault()
+    if (ev.dataTransfer.items) {
+      for (const item of [...ev.dataTransfer.items]) {
+        const i = [...ev.dataTransfer.items].indexOf(item)
+        // If dropped items aren't files, reject them
+        if (item.kind === 'file') {
+          const entry = item.webkitGetAsEntry()
+          console.log(`… file[${i}].fullPath = ${entry.fullPath}`)
+          console.log(`… file[${i}].isDirectory = ${entry.isDirectory}`)
+          if (entry.isDirectory) {
+            window.location.hash = ''
+            const ul = document.createElement('ul')
+            explore.innerHTML = ''
+            const collectedDirs = []
+            const collectedFiles = []
+            const toVisit = [entry]
+            while (toVisit.length) {
+              const dir = toVisit.pop()
+              collectedDirs.push(dir)
+              const entries = await readDir(dir)
+              collectedFiles.push(...(entries.filter(e => e.isFile)))
+              const subDirs = entries.filter(e => e.isDirectory)
+              toVisit.push(...subDirs)
+            }
+            collectedFiles.sort((a, b) => (a.fullPath.localeCompare(b.fullPath)))
+
+            const hash = window.location.hash
+            addEventListener('hashchange', async (_event) => {
+              const currentActive = document.querySelector('li.active')
+              if (currentActive) {
+                currentActive.classList.remove('active')
+              }
+              let element = document.querySelector(`li a[href="${window.location.hash}"]`)
+              if (element) {
+                detail.innerHTML = ''
+                element.parentElement.classList.add('active')
+
+                let result = await parseFile(window.location.hash)
+                if (result instanceof HTMLElement) {
+                  detail.appendChild(result)
+                  if (result.afterInsert) {
+                    result.afterInsert()
+                  }
+                } else {
+                  const pre = document.createElement('pre')
+                  pre.textContent = result
+                  detail.appendChild(pre)
+                }
+              }
+            })
+            FILES = {}
+            for (const entry of collectedFiles) {
+              const link = '#' + entry.fullPath
+              const li = document.createElement('li')
+              if (link === hash) {
+                li.classList.add('active')
+              }
+              const a = document.createElement('a')
+              a.textContent = entry.fullPath
+              a.href = link
+              li.id = entry.fullPath
+              li.appendChild(a)
+              ul.appendChild(li)
+            }
+            explore.appendChild(ul)
+            for (const fileEntry of collectedFiles) {
+              const fileObject = await new Promise((resolve, reject) => {fileEntry.file(resolve, reject)})
+              FILES['#' + fileEntry.fullPath] = {name: fileEntry.fullPath, type: fileObject.type, file: fileObject}
+            }
+          }
+        }
+      }
+    } else {
+      // Use DataTransfer interface to access the file(s)
+      [...ev.dataTransfer.files].forEach((file, i) => {
+        console.log(`… file[${i}].name = ${file.name}`)
+      })
+    }
+  }
+
+  function dragOverHandler (ev) {
+    console.log('File(s) in drop zone')
+
+    // Prevent default behavior (Prevent file from being opened)
+    ev.preventDefault()
+  }
+</script>
+</body>
+</html>
