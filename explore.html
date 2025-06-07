@@ -207,7 +207,6 @@
   }
 
   function generateHtmlTable (data, headerCount, labelDict) {
-    console.log('TABLE', data)
     const div = document.createElement('div')
     div.classList.add('clusterize')
     const table = document.createElement('table')
@@ -216,7 +215,6 @@
     let columnArray = []
     if (labelDict) {
       columnArray = []
-      console.log('data', data[headerCount - 1])
       for (const col of data[headerCount - 1]) {
         columnArray.push(labelDict[col])
       }
@@ -270,7 +268,6 @@
     }
     const recLen = pds['RECORD_BYTES']
     const imageStart = (imgPos - 1) * recLen
-    console.log('imgPos', imgPos, 'recLen', recLen, imageStart)
     const imgObj = pds['IMAGE'][0]
     const lines = parseInt(imgObj['LINES'])
     const samplesPerLine = parseInt(imgObj['LINE_SAMPLES'])
@@ -278,18 +275,14 @@
     let MAX_VALUE = 8 ** sampleBytes - 1
     if ('SAMPLE_BIT_MASK' in imgObj) {
       const [base, mask] = imgObj['SAMPLE_BIT_MASK'].split('#')
-      console.log('base', base, mask)
       MAX_VALUE = parseInt(mask, parseInt(base))
     }
-    console.log('MAX_VALUE', MAX_VALUE)
     const bands = parseInt(imgObj['BANDS'])
-    console.log('bands', bands)
     const pixelSize = sampleBytes * bands
     const imageSpan = pixelSize * samplesPerLine * lines
     const image = bytes.slice(imageStart, imageSpan)
     const ctor = PIXEL_REPR[sampleBytes]
     const pixels = new ctor(image)
-    console.log(pixels)
     const div = document.createElement('div')
     const canvas = document.createElement('canvas')
     canvas.width = samplesPerLine
@@ -321,8 +314,6 @@
     for (let x = 0; x < samplesPerLine; x++) {
       for (let y = 0; y < lines; y++) {
         const pix = readPix(pixels, x, y, bands, imgObj['BAND_STORAGE_TYPE'], MAX_VALUE)
-        if (pix >= 255)
-          console.log('pix', pix)
         imgBuffer.data[(x + y * samplesPerLine) * 4] = pix[0]
         imgBuffer.data[(x + y * samplesPerLine) * 4 + 1] = pix[1]
         imgBuffer.data[(x + y * samplesPerLine) * 4 + 2] = pix[2]
@@ -338,12 +329,23 @@
     return div
   }
 
+  async function getFile (hash) {
+    const entry = FILES[hash]
+    if (!entry) {
+      return null
+    }
+    if (!entry.file) {
+      entry.file = await new Promise((resolve, reject) => {entry.fileEntry.file(resolve, reject)})
+    }
+    return entry
+  }
+
   async function parseFile (hash) {
     const labelFileName = hash.slice(0, -4) + '.lbl'
     const labelDict = {}
-    const entry = FILES[hash]
+    const entry = await getFile(hash)
     if (!entry) {
-      return 'couldn\'t parse file :('
+      return 'couldn\'t parse file :( ' + hash
     }
     const extension = '.' + entry.name.split('.').pop()
     if (['.txt', '.ct', '.at', '.nat', '.rt', '.pef'].includes(extension)) {
@@ -369,7 +371,7 @@
     }
     if (extension === '.tab') {
       let labelFileName = hash.slice(0, -4) + '.lbl'
-      const labelFileEntry = FILES[labelFileName]
+      const labelFileEntry = await getFile(labelFileName)
       let labelDict = {}
       const headerRow = []
       if (labelFileEntry) {
@@ -377,9 +379,7 @@
         if (!('TABLE' in labels)) {
           labels = labels['UNCOMPRESSED_FILE'].find((o) => 'TABLE' in o)
         }
-        console.log('labels', labels)
         const colLabels = labels['TABLE'][0]['COLUMN']
-        console.log('colLabels', colLabels)
         for (const colLabel of colLabels) {
           labelDict[colLabel.NAME] = JSON.stringify(colLabel, null, 2)
           headerRow.push(colLabel.NAME)
@@ -389,13 +389,10 @@
     }
     if (extension === '.csv') {
       console.log('labelFileName', labelFileName)
-      const labelFileEntry = FILES[labelFileName]
-      console.log('labelFileEntry', labelFileEntry)
+      const labelFileEntry = await getFile(labelFileName)
       if (labelFileEntry) {
         const labels = parsePDS(await labelFileEntry.file.text())
-        console.log('labels', labels)
         const colLabels = labels['UNCOMPRESSED_FILE'].find((o) => 'TABLE' in o)['TABLE'][0]['COLUMN']
-        console.log('colLabels', colLabels)
         for (const colLabel of colLabels) {
           labelDict[colLabel.NAME] = JSON.stringify(colLabel, null, 2)
         }
@@ -480,8 +477,7 @@
             }
             explore.appendChild(ul)
             for (const fileEntry of collectedFiles) {
-              const fileObject = await new Promise((resolve, reject) => {fileEntry.file(resolve, reject)})
-              FILES['#' + fileEntry.fullPath] = {name: fileEntry.fullPath, type: fileObject.type, file: fileObject}
+              FILES['#' + fileEntry.fullPath] = {name: fileEntry.fullPath, fileEntry}
             }
           }
         }
