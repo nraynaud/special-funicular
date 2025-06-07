@@ -103,10 +103,10 @@
         }
     </style>
 </head>
-<body>
+<body ondrop="dropHandler(event);" ondragover="dragOverHandler(event);">
 <h1>PDS Mars Pathfinder Explorer</h1>
 <div id="wholeApp">
-    <div id="explore" ondrop="dropHandler(event);" ondragover="dragOverHandler(event);">
+    <div id="explore">
         drop a <a href="https://planetarydata.jpl.nasa.gov/img/data/mpf/">PDS folder</a> here.
     </div>
     <div id="detail">
@@ -348,7 +348,7 @@
       return 'couldn\'t parse file :( ' + hash
     }
     const extension = '.' + entry.name.split('.').pop()
-    if (['.txt', '.ct', '.at', '.nat', '.rt', '.pef'].includes(extension)) {
+    if (['.txt', '.ct', '.at', '.nat', '.rt', '.pef', '.pt'].includes(extension)) {
       return await entry.file.text()
     }
     if (['.lbl', '.cat', '.img', '.haf'].includes(extension)) {
