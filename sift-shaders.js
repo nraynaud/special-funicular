@@ -3,7 +3,6 @@
 
 // SIFT implementation constants
 import {
-  createTextureFromSource,
   makeBindGroupLayoutDescriptors,
   makeShaderDataDefinitions,
   makeStructuredView
@@ -22,60 +21,55 @@ class AllocatedRadialShader {
     this.shader = shader
   }
 
-  static createGPUResources (shader, pipelineDesc, inputImage, outputWidth, outputHeight, kernelBuffer) {
+  static async createGPUResources (shader, pipelineDesc, inputImage, outputWidth, outputHeight, kernelBuffer) {
     const resources = new AllocatedRadialShader(shader)
-    const pipeline = shader.device.createComputePipeline(pipelineDesc)
-    resources.pipeline = pipeline
+    resources.pipeline = shader.device.createComputePipeline(pipelineDesc)
     resources.pipelineDesc = pipelineDesc
     resources.kernelBuffer = kernelBuffer
     resources.outputWidth = outputWidth
     resources.outputHeight = outputHeight
-    resources.directionView = makeStructuredView(shader.defs.uniforms.horizontal)
+    resources.uniformsView = makeStructuredView(shader.defs.uniforms.parameters)
     resources.horizontalParam = shader.device.createBuffer({
-      size: resources.directionView.arrayBuffer.byteLength,
+      size: resources.uniformsView.arrayBuffer.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-    resources.directionView.set(1)
-    shader.device.queue.writeBuffer(resources.horizontalParam, 0, resources.directionView.arrayBuffer)
+    resources.uniformsView.set({
+      horizontal: 1
+    })
+    shader.device.queue.writeBuffer(resources.horizontalParam, 0, resources.uniformsView.arrayBuffer)
     resources.verticalParam = shader.device.createBuffer({
-      size: resources.directionView.arrayBuffer.byteLength,
+      size: resources.uniformsView.arrayBuffer.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-    resources.directionView.set(0)
-    shader.device.queue.writeBuffer(resources.verticalParam, 0, resources.directionView.arrayBuffer)
-    resources.inputTexture = createTextureFromSource(shader.device, inputImage)
-    resources.outputTexture = shader.device.createTexture({
-      size: [outputWidth, outputHeight, 5],
+    resources.uniformsView.set({
+      horizontal: 0
+    })
+    shader.device.queue.writeBuffer(resources.verticalParam, 0, resources.uniformsView.arrayBuffer)
+    resources.tempTexture = shader.device.createTexture({
+      label: 'temp',
+      size: [outputWidth, outputHeight],
       mipLevelCount: 1,
       format: 'rgba8unorm',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING
     })
-    resources.outputPlane0View = resources.outputTexture.createView({
-      dimension: '2d',
+    resources.outputTexture = shader.device.createTexture({
+      label: 'output',
+      size: [outputWidth, outputHeight, 5],
       mipLevelCount: 1,
-      baseMipLevel: 0,
-      baseArrayLayer: 0
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
     })
-    resources.inputView = resources.inputTexture.createView()
-    resources.horizontalBindGroup = shader.device.createBindGroup({
-      label: 'Gauss horizontal bind group 0',
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: resources.outputPlane0View
-        },
-        {binding: 2, resource: resources.inputView},
-        {binding: 3, resource: {buffer: resources.horizontalParam}},
-        {binding: 4, resource: {buffer: kernelBuffer}},
-      ]
-    })
-    resources.outputPlane1View = resources.outputTexture.createView({
-      dimension: '2d',
-      mipLevelCount: 1,
-      baseMipLevel: 0,
-      baseArrayLayer: 1
-    })
+    const copySize = [inputImage.width, inputImage.height, 1]
+    // should handle both ImageBitmap and ImageData
+    shader.device.queue.copyExternalImageToTexture({source: inputImage}, {
+      texture: resources.outputTexture,
+      origin: [0, 0, 0]
+    }, copySize)
+    resources.tempView = resources.tempTexture.createView({dimension: '2d'})
+    resources.outViews = []
+    for (let i = 0; i < resources.outputTexture.depthOrArrayLayers; i++) {
+      resources.outViews.push(resources.outputTexture.createView({dimension: '2d', baseArrayLayer: i}))
+    }
     return resources
   }
 
@@ -116,35 +110,39 @@ class AllocatedRadialShader {
       },
     })
     computePass.setPipeline(this.pipeline)
-    let vInput = this.outputPlane0View
-    let vOutput = this.outputPlane1View
+    let vInput
+    let vOutput = this.outViews[1]
     let outCopyOrig
     if (callHorizontal) {
-      computePass.setBindGroup(0, this.horizontalBindGroup)
-      computePass.dispatchWorkgroups(...horizontalWorkGroups)
-      outCopyOrig = {texture: this.outputTexture, origin: [0, 0, 0]}
-    } else {
-      vInput = this.inputView
-      outCopyOrig = {texture: this.inputTexture, origin: [0, 0, 0]}
-    }
-    if (callVertical) {
-      const vBindGroup = this.shader.device.createBindGroup({
-        label: 'Gauss vertical bind group 0',
+      computePass.setBindGroup(0, device.createBindGroup({
+        label: 'Gauss bind group 0',
         layout: this.pipeline.getBindGroupLayout(0),
         entries: [
-          {
-            binding: 0,
-            resource: vOutput
-          },
-          {
-            binding: 2,
-            resource: vInput
-          },
-          {binding: 3, resource: {buffer: this.verticalParam}},
-          {binding: 4, resource: {buffer: this.kernelBuffer}},
+          {binding: 0, resource: this.outViews[0]},
+          {binding: 1, resource: this.tempView},
+          {binding: 2, resource: {buffer: this.horizontalParam}},
+          {binding: 3, resource: {buffer: this.kernelBuffer}},
         ]
-      })
-      computePass.setBindGroup(0, vBindGroup)
+      }))
+      computePass.dispatchWorkgroups(...horizontalWorkGroups)
+      outCopyOrig = {texture: this.tempTexture, origin: [0, 0, 0]}
+      vInput = this.tempView
+    } else {
+      vInput = this.outViews[0]
+      outCopyOrig = {texture: this.outputTexture, origin: [0, 0, 0]}
+    }
+    if (callVertical) {
+      computePass.setBindGroup(0, device.createBindGroup({
+        label: 'Gauss bind group 0',
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries: [
+          {binding: 0, resource: vInput},
+          {binding: 1, resource: vOutput},
+          {binding: 2, resource: {buffer: this.verticalParam}},
+          {binding: 3, resource: {buffer: this.kernelBuffer}},
+        ]
+      }))
+
       computePass.dispatchWorkgroups(...verticalWorkGroups)
       outCopyOrig = {texture: this.outputTexture, origin: [0, 0, 1]}
     }
@@ -152,7 +150,7 @@ class AllocatedRadialShader {
     commandEncoder.copyTextureToBuffer(
       outCopyOrig,
       {buffer: outputBuffer, bytesPerRow},
-      [this.outputWidth, this.outputHeight]
+      [this.outputWidth, this.outputHeight, 1]
     )
     commandEncoder.resolveQuerySet(querySet, 0, querySet.count, resolveBuffer, 0)
     commandEncoder.copyBufferToBuffer(resolveBuffer, 0, resultBuffer, 0, resultBuffer.size)
@@ -193,20 +191,18 @@ export class RadialShader {
   static async createShader (device) {
     const shaderCode = await (await fetch('radial.wgsl')).text()
     const defs = makeShaderDataDefinitions(shaderCode)
-    console.log('DEFINITIONS', defs)
     // partial pipeline to generate layout
     const pipelineDesc = {
       label: 'Gaussian Blur Pipeline Test',
       layout: 'auto',
       compute: {
-        entryPoint: 'main',
+        entryPoint: 'single_pass_radial',
         constants: {},
       }
     }
     const descriptors = makeBindGroupLayoutDescriptors(defs, pipelineDesc)
     const bindGroupLayouts = descriptors.map(d => device.createBindGroupLayout(d))
     const pipelineLayout = device.createPipelineLayout({bindGroupLayouts: bindGroupLayouts})
-    console.log('LAYOUTS', descriptors)
     const module = device.createShaderModule({
       label: 'Gaussian Blur Shader Test',
       code: shaderCode,
@@ -214,8 +210,7 @@ export class RadialShader {
     return new RadialShader(device, pipelineLayout, pipelineDesc, defs, module)
   }
 
-  async createGPUResources (kernelRadius, workgroupSize, inputImage, outputWidth, outputHeight, kernelBuffer) {
-    this.pipelineDesc.compute.constants.kernel_radius = kernelRadius
+  async createGPUResources (workgroupSize, inputImage, outputWidth, outputHeight, kernelBuffer) {
     this.pipelineDesc.compute.constants.workgroup_size = workgroupSize
     let pipelineDesc = structuredClone(this.pipelineDesc)
     console.log('pipelineDesc', JSON.stringify(pipelineDesc))

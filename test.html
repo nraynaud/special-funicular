@@ -215,10 +215,9 @@
 
       const img = canvasElement
       img.className = 'test-image'
-      canvasElement.toBlob(blob => {
-        img.title = 'Click to enlarge'
-        img.onclick = () => { showImageModal(imageData)}
-      })
+      img.title = 'Click to enlarge'
+      img.onclick = () => { showImageModal(imageData)}
+
 
       const imgContainer = document.createElement('div')
       imgContainer.style.marginTop = '10px'
@@ -247,12 +246,8 @@
     })
   })
 
-  // Function to save test results to localStorage and send to server
   function saveTestResults (results) {
     try {
-      // Save to localStorage
-      localStorage.setItem('webgpu_sift_test_results', JSON.stringify(results))
-      console.log('Test results saved to localStorage')
 
       // Also try to send results to server
       try {

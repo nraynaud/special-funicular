@@ -1,13 +1,21 @@
 override workgroup_size = 64;
-override kernel_radius = 20;
 override convert_to_gray = 0;
 const use_workgroup_mem = 1;
-override workgroup_pixel_count = 16384/4;
-@group(0) @binding(0) var outputTexture: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(2) var inputTexture: texture_2d<f32>;
-@group(0) @binding(3) var<uniform> horizontal: i32;
-@group(0) @binding(4) var<storage, read> kernel: array<f32>;
+override workgroup_pixel_count = 16300/4;
+
+struct Params {
+    horizontal: u32,
+    convert_to_gray: u32,
+    operation: u32,
+};
+
+@group(0) @binding(0) var inputTexture: texture_2d<f32>;
+@group(0) @binding(1) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> parameters: Params;
+@group(0) @binding(3) var<storage> kernel: array<f32>;
+
 var<workgroup> workgroupPixels: array<u32, workgroup_pixel_count>;
+var<workgroup> current_kernel_radius: u32;
 
 fn read_input(pix_pos: vec2i) -> vec4f {
     return textureLoad(inputTexture, pix_pos, 0);
@@ -49,15 +57,16 @@ fn to_gray(texel: vec4f) -> vec4f {
 }
 
 @compute @workgroup_size(workgroup_size, 1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>,
+fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>) {
-    let kernel_radius = i32(arrayLength(&kernel));
+    current_kernel_radius = arrayLength(&kernel);
+    let kernel_radius = i32(workgroupUniformLoad(&current_kernel_radius));
     var pixel_pos = vec2i(global_id.xy);
     var workgroup_pos = vec2i(workgroup_id.xy) * workgroup_size;
     var local_pos = vec2i(local_id.xy);
     var direction = vec2i(1, 0);
-    if horizontal == 0 {
+    if parameters.horizontal == 0 {
         pixel_pos = pixel_pos.yx;
         workgroup_pos = workgroup_pos.yx;
         local_pos = local_pos.yx;

@@ -153,8 +153,6 @@ export async function testGaussianBlurShader (device) {
         console.log(`Pixel at (${x}, ${midY}): RGBA=(${textureData[idx]}, ${textureData[idx + 1]}, ${textureData[idx + 2]}, ${textureData[idx + 3]})`)
       }
 
-      let gpuTime
-
       function computeGaussianValue (radius, kernelRadius, sigma = null) {
         if (sigma == null) {
           sigma = kernelRadius / 3 // 3*sigma covers >99% of Gaussian
@@ -168,14 +166,13 @@ export async function testGaussianBlurShader (device) {
       }
 
       const quenelle = computeGaussianKernel(kernelRadius)
-      console.log('computeGaussianValue', quenelle)
       const kernelBuffer = device.createBuffer({
         size: quenelle.byteLength,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       })
       device.queue.writeBuffer(kernelBuffer, 0, quenelle)
 
-      let allocatedShader = await ts.createGPUResources(kernelRadius, workgroupSize, inputImage, width, height, kernelBuffer)
+      let allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, width, height, kernelBuffer)
       let outputData = await allocatedShader.runShader(true, false)
 
       console.log('####outputData', outputData.width, outputData.height, outputData.constructor.name)
@@ -209,7 +206,7 @@ export async function testGaussianBlurShader (device) {
       await assert.imageTest(inputImage, outputData, `Horizontal blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, grayRowDetected)
 
       // Vertical test
-      allocatedShader = await ts.createGPUResources(kernelRadius, workgroupSize, inputImage, width, height, kernelBuffer)
+      allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, width, height, kernelBuffer)
       outputData = await allocatedShader.runShader(false, true)
       let whiteColumnUntouched = true
       for (let y = 0; y < height; y++) {
@@ -231,13 +228,13 @@ export async function testGaussianBlurShader (device) {
       // Display input and output images for this assertion
       await assert.imageTest(inputImage, outputData, 'Vertical blur: Input and output images', grayColumnDetected)
       ts = await RadialShader.createShader(device, kernelRadius, workgroupSize)
-      allocatedShader = await ts.createGPUResources(kernelRadius, workgroupSize, inputImage, inputImage.width, inputImage.height, kernelBuffer)
+      allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, inputImage.width, inputImage.height, kernelBuffer)
       outputImage = await allocatedShader.runShader(true, true)
       await assert.imageTest(inputImage, outputImage, `Blur, running both passes. GPU time: ${allocatedShader.gpuTime}`, whiteColumnUntouched)
 
       let testImage = await createImageBitmap(await (await fetch('3916587d9b.png')).blob())
       ts = await RadialShader.createShader(device, kernelRadius, workgroupSize)
-      allocatedShader = await ts.createGPUResources(kernelRadius, workgroupSize, testImage, testImage.width, testImage.height, kernelBuffer)
+      allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, kernelBuffer)
       outputImage = await allocatedShader.runShader(true, true)
       await assert.imageTest(testImage, outputImage, `Complete blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, true)
       //NASM-A20150317000-NASM2018-10769.jpg
@@ -246,7 +243,7 @@ export async function testGaussianBlurShader (device) {
       console.log('testImage size', testImage.width, testImage.height)
       console.timeEnd('createImageBitmap')
       ts = await RadialShader.createShader(device, kernelRadius, workgroupSize)
-      allocatedShader = await ts.createGPUResources(kernelRadius, workgroupSize, testImage, testImage.width, testImage.height, kernelBuffer)
+      allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, kernelBuffer)
       outputImage = await allocatedShader.runShader(true, true)
       console.time('imageTest')
       await assert.imageTest(testImage, outputImage, `Complete blur on big image: Input and output images. GPU time: ${allocatedShader.gpuTime}`, true)
