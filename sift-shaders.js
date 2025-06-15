@@ -122,7 +122,6 @@ class AllocatedRadialShader {
       const horizontalWorkGroups = [Math.ceil(outputWidth / workgroupSize), outputHeight]
       const verticalWorkGroups = [Math.ceil(outputHeight / workgroupSize), outputWidth]
       for (const [index, kernel] of this.kernelBuffers.entries()) {
-        console.log('kernel index: ' + index, 'mip', mipLevel)
         let inputParamBuffer = this.createUniformBuffer({
           horizontal: 1,
           from_mip: inputMipLevel
@@ -233,7 +232,6 @@ class AllocatedRadialShader {
     await this.outputBuffer.mapAsync(GPUMapMode.READ)
     try {
       const outputData = new Uint8ClampedArray(this.outputBuffer.getMappedRange()).slice(0, bytesPerRow * outH)
-      console.log('out buffer length: ', outputData.byteLength, bytesPerRow * outH, bytesPerRow, bytesPerRow / 4, outH)
       return createImageBitmap(new ImageData(outputData, bytesPerRow / 4, outH), 0, 0, outW, outH)
     } finally {
       this.outputBuffer.unmap()
