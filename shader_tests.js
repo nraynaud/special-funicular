@@ -15,15 +15,12 @@ export async function runShaderTests () {
       assert.ok(adapter, 'No appropriate GPU adapter found')
     })
     const device = await adapter.requestDevice({
-      label: 'Shader Test Device',
-      requiredFeatures: ['timestamp-query'],
-      requiredLimits: {maxTextureDimension2D: 16384}
+      label: 'Shader Test Device', requiredFeatures: ['timestamp-query'], requiredLimits: {maxTextureDimension2D: 16384}
     })
     QUnit.module('Shader Tests', {
       before: function () {
         console.log('Starting shader tests module')
-      },
-      after: function () {
+      }, after: function () {
         console.log('Completed shader tests module')
       }
     })
@@ -44,17 +41,12 @@ async function readTextureData (device, texture, width, height) {
   const bytesPerRow = Math.ceil((width * 4) / 256) * 256
 
   const outputBuffer = device.createBuffer({
-    size: bytesPerRow * height,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    size: bytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
   })
 
   // Copy texture to buffer
   const commandEncoder = device.createCommandEncoder()
-  commandEncoder.copyTextureToBuffer(
-    {texture},
-    {buffer: outputBuffer, bytesPerRow},
-    [width, height]
-  )
+  commandEncoder.copyTextureToBuffer({texture}, {buffer: outputBuffer, bytesPerRow}, [width, height])
   device.queue.submit([commandEncoder.finish()])
 
   // Read the buffer
@@ -167,7 +159,6 @@ export async function testGaussianBlurShader (device) {
 
       const quenelle = computeGaussianKernel(kernelRadius)
 
-
       let allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, width, height, [quenelle], HORIZONTAL)
       let outputData = await allocatedShader.runShader()
 
@@ -188,8 +179,7 @@ export async function testGaussianBlurShader (device) {
       // Display input and output images for this assertion
       await assert.imageTest(inputImage, outputData, `Horizontal blur: Input and output. GPU time: ${allocatedShader.gpuTime}`, whiteRowUntouched)
 
-      const euclideanDistance = (a, b) =>
-        Math.hypot(...Object.keys(a).map(k => b[k] - a[k]))
+      const euclideanDistance = (a, b) => Math.hypot(...Object.keys(a).map(k => b[k] - a[k]))
       const gray = [160, 160, 160]
       let grayRowDetected = true
       for (let x = 20; x < width - 20; x++) {
@@ -246,7 +236,11 @@ export async function testGaussianBlurShader (device) {
       allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, gs)
       outputImage = await allocatedShader.runShader()
       console.time('imageTest')
-      await assert.imageTest(testImage, outputImage, `Complete blur on big image: Input and output images. GPU time: ${allocatedShader.gpuTime}`, true)
+      for (let mipLevel = 0; mipLevel < 10; mipLevel++) {
+        for (let index = 0; index < gaussians.length; index++) {
+          await assert.imageTest(testImage, await allocatedShader.getOutputTexture(index, mipLevel), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
+        }
+      }
       console.timeEnd('imageTest')
     } catch (error) {
       console.error('Error testing Gaussian Blur Shader:', error)
@@ -264,17 +258,13 @@ export async function testDogShader (device) {
     try {
       // Create shader module
       const dogModule = device.createShaderModule({
-        label: 'DoG Shader Test',
-        code: dogShader
+        label: 'DoG Shader Test', code: dogShader
       })
 
       // Create compute pipeline
       const dogPipeline = device.createComputePipeline({
-        label: 'DoG Pipeline Test',
-        layout: 'auto',
-        compute: {
-          module: dogModule,
-          entryPoint: 'main'
+        label: 'DoG Pipeline Test', layout: 'auto', compute: {
+          module: dogModule, entryPoint: 'main'
         }
       })
 
@@ -294,17 +284,10 @@ export async function testDogShader (device) {
       }
 
       const texture1 = device.createTexture({
-        size: [width, height],
-        format: 'rgba8unorm',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        size: [width, height], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
       })
 
-      device.queue.writeTexture(
-        {texture: texture1},
-        texture1Data,
-        {bytesPerRow: width * 4},
-        [width, height]
-      )
+      device.queue.writeTexture({texture: texture1}, texture1Data, {bytesPerRow: width * 4}, [width, height])
 
       // Second texture: darker gray
       const texture2Data = new Uint8Array(width * height * 4)
@@ -314,33 +297,23 @@ export async function testDogShader (device) {
       }
 
       const texture2 = device.createTexture({
-        size: [width, height],
-        format: 'rgba8unorm',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        size: [width, height], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
       })
 
-      device.queue.writeTexture(
-        {texture: texture2},
-        texture2Data,
-        {bytesPerRow: width * 4},
-        [width, height]
-      )
+      device.queue.writeTexture({texture: texture2}, texture2Data, {bytesPerRow: width * 4}, [width, height])
 
       // Create output texture
       const outputTexture = device.createTexture({
-        size: [width, height],
-        format: 'rgba8unorm',
-        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC
+        size: [width, height], format: 'rgba8unorm', usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC
       })
 
       // Create bind group
       const bindGroup = device.createBindGroup({
         layout: dogPipeline.getBindGroupLayout(0),
-        entries: [
-          {binding: 0, resource: texture1.createView()},
-          {binding: 1, resource: texture2.createView()},
-          {binding: 2, resource: outputTexture.createView()}
-        ]
+        entries: [{binding: 0, resource: texture1.createView()}, {
+          binding: 1,
+          resource: texture2.createView()
+        }, {binding: 2, resource: outputTexture.createView()}]
       })
 
       // Run the shader
@@ -379,12 +352,7 @@ export async function testDogShader (device) {
         }
       }
 
-      assert.ok(
-        allPixelsCorrect,
-        incorrectPixelValue === null
-          ? 'DoG computation correctly calculated the difference'
-          : `DoG computation incorrect. Expected ~${expectedDifference}, got ${incorrectPixelValue}`
-      )
+      assert.ok(allPixelsCorrect, incorrectPixelValue === null ? 'DoG computation correctly calculated the difference' : `DoG computation incorrect. Expected ~${expectedDifference}, got ${incorrectPixelValue}`)
 
       // Create ImageData objects for input and output images
       const inputImageData1 = new ImageData(new Uint8ClampedArray(texture1Data), width, height)

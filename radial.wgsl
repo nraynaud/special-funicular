@@ -1,10 +1,11 @@
 override workgroup_size = 64;
 override convert_to_gray = 0;
-const use_workgroup_mem = 1;
+const use_workgroup_mem = 0;
 override workgroup_pixel_count = 16300/4;
 
 struct Params {
     horizontal: u32,
+    from_mip: u32,
     convert_to_gray: u32,
     operation: u32,
 };
@@ -13,18 +14,16 @@ struct Params {
 @group(0) @binding(1) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var<uniform> parameters: Params;
 @group(0) @binding(3) var<storage> kernel: array<f32>;
-@group(0) @binding(4) var inputSampler: sampler;
 
 var<workgroup> workgroupPixels: array<u32, workgroup_pixel_count>;
 var<workgroup> current_kernel_radius: u32;
 
 fn read_input(pix_pos: vec2i) -> vec4f {
-    return textureLoad(inputTexture, pix_pos, 0);
+    return textureLoad(inputTexture, pix_pos, parameters.from_mip);
 }
 
-fn fill_workgroup_mem(direction: vec2i, workgroup_pos: vec2i, local_pos: vec2i, pixel_pos: vec2i, kernel_radius: i32) {
+fn fill_workgroup_mem(direction: vec2i, workgroup_pos: vec2i, local_pos: vec2i, pixel_pos: vec2i, kernel_radius: i32, io_ratio: vec2i) {
     let otherDirection = direction.yx;
-    let inputSize = vec2i(textureDimensions(inputTexture));
   // -1 for the first pixel of the kernel (the center), who is not repeated
     let workgroupReadPixelsCount = workgroup_size + (kernel_radius - 1) * 2;
     let workgroupPosInDirection = dot(workgroup_pos, direction);
@@ -35,11 +34,10 @@ fn fill_workgroup_mem(direction: vec2i, workgroup_pos: vec2i, local_pos: vec2i, 
     let myFirstWritePixel = localPosInDirection * memberPixelCount;
     let myFirstInputPixel = workgroupFirstReadPixel + localPosInDirection * memberPixelCount;
     let myFirstInputPosition = myFirstInputPixel * direction + pixel_pos * otherDirection;
+    let inputSize = vec2i(textureDimensions(inputTexture, parameters.from_mip));
     for (var i = 0; i < memberPixelCount; i++) {
-        let samplePos = myFirstInputPosition + direction * i;
+        let samplePos = (myFirstInputPosition + direction * i) * io_ratio;
         if all(samplePos >= vec2i(0, 0)) && all(samplePos < inputSize) {
-            // +0.5 to get to textel center
-            let samplePosf = (vec2f(samplePos) + 0.5) / vec2f(inputSize);
             let texel = read_input(samplePos);
             workgroupPixels[myFirstWritePixel + i] = pack4x8unorm(texel);
         }
@@ -74,12 +72,15 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
         direction = direction.yx;
     }
     let outputSize = vec2i(textureDimensions(outputTexture));
-    let inputSize = vec2i(textureDimensions(inputTexture));
+    let inputSize = vec2i(textureDimensions(inputTexture, parameters.from_mip));
+    // sift only jumps by a ratio of 2, and samples the bigger input texture at every other textel
+    // we will compute everything in the output sampling space, and just scale the input coords by io_ratio
+    let io_ratio = inputSize / outputSize;
     let otherDirection = direction.yx;
 
   // *** 1) put some input pixels in workgroup memory
     if use_workgroup_mem != 0 {
-        fill_workgroup_mem(direction, workgroup_pos, local_pos, pixel_pos, kernel_radius);
+        fill_workgroup_mem(direction, workgroup_pos, local_pos, pixel_pos, kernel_radius, io_ratio);
     }
 
   // *** 2) compute the 1D kernel
@@ -93,13 +94,14 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
     var weightSum = 0.0;
     for (var i = -kernel_radius + 1; i < kernel_radius; i++) {
         let pixReadPos = pixel_pos + direction * i;
-        if all(pixReadPos >= vec2i(0, 0)) && all(pixReadPos < inputSize) {
+        // using outputsize because the workgroup mem is at outputSize sampling rate
+        if all(pixReadPos >= vec2i(0, 0)) && all(pixReadPos < outputSize) {
             let weight = kernel[abs(i)];
             var texel: vec4f;
             if use_workgroup_mem != 0 {
                 texel = read_workgroup_mem(pixReadPos, workgroup_pos, direction, kernel_radius);
             } else {
-                texel = read_input(pixReadPos);
+                texel = read_input(pixReadPos * io_ratio);
             }
             if convert_to_gray != 0 {
                 texel = to_gray(texel);
@@ -122,11 +124,11 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
 fn downsample(@builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>) {
-    let outputSize =textureDimensions(outputTexture);
+    let outputSize = textureDimensions(outputTexture);
     var pixel_pos = global_id.xy;
     if any(pixel_pos >= outputSize) {
         return;
     }
-    let pix = textureSampleLevel(inputTexture, inputSampler, vec2f(pixel_pos) / vec2f(outputSize), 0);
+    let pix = textureLoad(inputTexture, pixel_pos, parameters.from_mip);
     textureStore(outputTexture, pixel_pos, pix);
 }
