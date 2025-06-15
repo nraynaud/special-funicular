@@ -1,5 +1,5 @@
 import {
-  dogShader, RadialShader,
+  dogShader, HORIZONTAL, RadialShader, VERTICAL,
 } from './sift-shaders.js'
 
 export async function runShaderTests () {
@@ -166,14 +166,10 @@ export async function testGaussianBlurShader (device) {
       }
 
       const quenelle = computeGaussianKernel(kernelRadius)
-      const kernelBuffer = device.createBuffer({
-        size: quenelle.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      })
-      device.queue.writeBuffer(kernelBuffer, 0, quenelle)
 
-      let allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, width, height, kernelBuffer)
-      let outputData = await allocatedShader.runShader(true, false)
+
+      let allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, width, height, [quenelle], HORIZONTAL)
+      let outputData = await allocatedShader.runShader()
 
       console.log('####outputData', outputData.width, outputData.height, outputData.constructor.name)
       // Test horizontal blur
@@ -206,8 +202,8 @@ export async function testGaussianBlurShader (device) {
       await assert.imageTest(inputImage, outputData, `Horizontal blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, grayRowDetected)
 
       // Vertical test
-      allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, width, height, kernelBuffer)
-      outputData = await allocatedShader.runShader(false, true)
+      allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, width, height, [quenelle], VERTICAL)
+      outputData = await allocatedShader.runShader()
       let whiteColumnUntouched = true
       for (let y = 0; y < height; y++) {
         let x = 0 //first column should be white
@@ -228,14 +224,14 @@ export async function testGaussianBlurShader (device) {
       // Display input and output images for this assertion
       await assert.imageTest(inputImage, outputData, 'Vertical blur: Input and output images', grayColumnDetected)
       ts = await RadialShader.createShader(device, kernelRadius, workgroupSize)
-      allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, inputImage.width, inputImage.height, kernelBuffer)
-      outputImage = await allocatedShader.runShader(true, true)
+      allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, inputImage.width, inputImage.height, [quenelle])
+      outputImage = await allocatedShader.runShader()
       await assert.imageTest(inputImage, outputImage, `Blur, running both passes. GPU time: ${allocatedShader.gpuTime}`, whiteColumnUntouched)
 
       let testImage = await createImageBitmap(await (await fetch('3916587d9b.png')).blob())
       ts = await RadialShader.createShader(device, kernelRadius, workgroupSize)
-      allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, kernelBuffer)
-      outputImage = await allocatedShader.runShader(true, true)
+      allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, [quenelle])
+      outputImage = await allocatedShader.runShader()
       await assert.imageTest(testImage, outputImage, `Complete blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, true)
       //NASM-A20150317000-NASM2018-10769.jpg
       console.time('createImageBitmap')
@@ -243,17 +239,15 @@ export async function testGaussianBlurShader (device) {
       console.log('testImage size', testImage.width, testImage.height)
       console.timeEnd('createImageBitmap')
       ts = await RadialShader.createShader(device, kernelRadius, workgroupSize)
-      allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, kernelBuffer)
-      outputImage = await allocatedShader.runShader(true, true)
+      const gaussians = [1.2262735, 1.54500779, 1.94658784, 2.452547, 3.09001559]
+      console.log('triple gaussians', gaussians, gaussians.map(g => g * 3))
+      const gs = gaussians.map(sigma => computeGaussianKernel(Math.ceil(sigma * 3), sigma))
+      console.log('gaussians', gs)
+      allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, gs)
+      outputImage = await allocatedShader.runShader()
       console.time('imageTest')
       await assert.imageTest(testImage, outputImage, `Complete blur on big image: Input and output images. GPU time: ${allocatedShader.gpuTime}`, true)
       console.timeEnd('imageTest')
-      const imagesPerOctaves = 5
-      const gaussians = [1.2262735, 1.54500779, 1.94658784, 2.452547, 3.09001559]
-      console.log('tripple gaussians', gaussians, gaussians.map(g => g * 3))
-      const gs = gaussians.map(sigma => computeGaussianKernel(Math.ceil(sigma * 3), sigma))
-      console.log('gaussians', gs)
-      kernelBuffer.destroy()
     } catch (error) {
       console.error('Error testing Gaussian Blur Shader:', error)
       assert.ok(false, `Error testing Gaussian Blur Shader: ${error.message}`)

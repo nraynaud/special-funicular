@@ -3,9 +3,7 @@
 
 // SIFT implementation constants
 import {
-  makeBindGroupLayoutDescriptors,
-  makeShaderDataDefinitions,
-  makeStructuredView
+  makeBindGroupLayoutDescriptors, makeShaderDataDefinitions, makeStructuredView
 } from './lib/webgpu-utils.module.js'
 
 export const NUM_OCTAVES = 4
@@ -16,35 +14,44 @@ export const CONTRAST_THRESHOLD = 0.001 // Reduced threshold to detect more feat
 export const EDGE_THRESHOLD = 5.0
 export const MAX_KEYPOINTS = 10000
 
+export const HORIZONTAL = 1
+export const VERTICAL = 2
+
 class AllocatedRadialShader {
   constructor (shader) {
     this.shader = shader
   }
 
-  static async createGPUResources (shader, pipelineDesc, inputImage, outputWidth, outputHeight, kernelBuffer) {
+  static async createGPUResources (shader, pipelineDesc, inputImage, outputWidth, outputHeight, kernels, oneDirection = null) {
+    console.assert(oneDirection == null || kernels.length === 1, `can use oneDirection parameter only when there is only one kernel, found ${kernels.length} kernels`)
     const resources = new AllocatedRadialShader(shader)
+    resources.device = shader.device
     resources.pipeline = shader.device.createComputePipeline(pipelineDesc)
     resources.pipelineDesc = pipelineDesc
-    resources.kernelBuffer = kernelBuffer
+    resources.kernelBuffers = kernels.map(k => {
+      const kernelBuffer = shader.device.createBuffer({
+        size: k.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      })
+      shader.device.queue.writeBuffer(kernelBuffer, 0, k)
+      return kernelBuffer
+    })
     resources.outputWidth = outputWidth
     resources.outputHeight = outputHeight
-    resources.uniformsView = makeStructuredView(shader.defs.uniforms.parameters)
+
     resources.horizontalParam = shader.device.createBuffer({
-      size: resources.uniformsView.arrayBuffer.byteLength,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      size: shader.uniformsView.arrayBuffer.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-    resources.uniformsView.set({
+    shader.uniformsView.set({
       horizontal: 1
     })
-    shader.device.queue.writeBuffer(resources.horizontalParam, 0, resources.uniformsView.arrayBuffer)
+    shader.device.queue.writeBuffer(resources.horizontalParam, 0, shader.uniformsView.arrayBuffer)
     resources.verticalParam = shader.device.createBuffer({
-      size: resources.uniformsView.arrayBuffer.byteLength,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      size: shader.uniformsView.arrayBuffer.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-    resources.uniformsView.set({
+    shader.uniformsView.set({
       horizontal: 0
     })
-    shader.device.queue.writeBuffer(resources.verticalParam, 0, resources.uniformsView.arrayBuffer)
+    shader.device.queue.writeBuffer(resources.verticalParam, 0, shader.uniformsView.arrayBuffer)
     resources.tempTexture = shader.device.createTexture({
       label: 'temp',
       size: [outputWidth, outputHeight],
@@ -52,77 +59,98 @@ class AllocatedRadialShader {
       format: 'rgba8unorm',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING
     })
+    const mipLevels = Math.floor(Math.log2(Math.min(outputWidth, outputHeight)))
+    console.log('mipLevels', mipLevels)
     resources.outputTexture = shader.device.createTexture({
       label: 'output',
-      size: [outputWidth, outputHeight, 5],
-      mipLevelCount: 1,
+      size: [outputWidth, outputHeight, kernels.length + 1],
+      mipLevelCount: mipLevels,
       format: 'rgba8unorm',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
     })
     const copySize = [inputImage.width, inputImage.height, 1]
     // should handle both ImageBitmap and ImageData
     shader.device.queue.copyExternalImageToTexture({source: inputImage}, {
-      texture: resources.outputTexture,
-      origin: [0, 0, 0]
+      texture: resources.outputTexture, origin: [0, 0, 0]
     }, copySize)
     resources.tempView = resources.tempTexture.createView({dimension: '2d'})
     resources.outViews = []
     for (let i = 0; i < resources.outputTexture.depthOrArrayLayers; i++) {
-      resources.outViews.push(resources.outputTexture.createView({dimension: '2d', baseArrayLayer: i}))
+      resources.outViews.push(resources.outputTexture.createView({
+        dimension: '2d', baseArrayLayer: i, mipLevelCount: 1
+      }))
+    }
+    const bytesPerRow = Math.ceil((outputWidth * 4) / 256) * 256
+    resources.outputBuffer = shader.device.createBuffer({
+      size: bytesPerRow * outputHeight, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    })
+    const workgroupSize = resources.pipelineDesc.compute.constants.workgroup_size
+    const horizontalWorkGroups = [Math.ceil(resources.outputWidth / workgroupSize), resources.outputHeight]
+    const verticalWorkGroups = [Math.ceil(resources.outputHeight / workgroupSize), resources.outputWidth]
+    if (kernels.length === 1) {
+      const callHorizontal = oneDirection == null || oneDirection === HORIZONTAL
+      const callVertical = oneDirection == null || oneDirection === VERTICAL
+      resources.encodedCommands = await resources.encodeSinglePass(callHorizontal, callVertical, horizontalWorkGroups, verticalWorkGroups)
+    } else {
+      resources.encodedCommands = await resources.encodeRepeatedPasses(horizontalWorkGroups, verticalWorkGroups)
     }
     return resources
   }
 
-  async runShader (callHorizontal = true, callVertical = true) {
-    console.time('runShader')
-    // Calculate bytesPerRow, which must be a multiple of 256 for WebGPU
+  async encodeRepeatedPasses (horizontalWorkGroups, verticalWorkGroups) {
     const bytesPerRow = Math.ceil((this.outputWidth * 4) / 256) * 256
-    // Create a buffer to copy the texture data to
-    const device = this.shader.device
-    const outputBuffer = device.createBuffer({
-      size: bytesPerRow * this.outputHeight,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    })
-    const querySet = device.createQuerySet({
-      type: 'timestamp',
-      count: 2,
-    })
-    const resolveBuffer = device.createBuffer({
-      size: querySet.count * 8,
-      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
-    })
-    const resultBuffer = device.createBuffer({
-      size: resolveBuffer.size,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    })
-
-    const commandEncoder = device.createCommandEncoder()
-    const workgroupSize = this.pipelineDesc.compute.constants.workgroup_size
-    const horizontalWorkGroups = [Math.ceil(this.outputWidth / workgroupSize), this.outputHeight]
-    const verticalWorkGroups = [Math.ceil(this.outputHeight / workgroupSize), this.outputWidth]
-    console.log('verticalWorkGroups', verticalWorkGroups)
+    const commandEncoder = this.device.createCommandEncoder()
     const computePass = commandEncoder.beginComputePass({
       label: 'Gaussian compute pass',
-      timestampWrites: {
-        querySet,
-        beginningOfPassWriteIndex: 0,
-        endOfPassWriteIndex: 1,
-      },
+    })
+    computePass.setPipeline(this.pipeline)
+    for (const [index, kernel] of this.kernelBuffers.entries()) {
+      console.log('kernel index: ' + index)
+      computePass.setBindGroup(0, this.device.createBindGroup({
+        label: 'Gauss bind group 0',
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries: [{binding: 0, resource: this.outViews[Math.max(index - 1, 0)]}, {
+          binding: 1,
+          resource: this.tempView
+        }, {binding: 2, resource: {buffer: this.horizontalParam}}, {binding: 3, resource: {buffer: kernel}},]
+      }))
+      computePass.dispatchWorkgroups(...horizontalWorkGroups)
+      computePass.setBindGroup(0, this.device.createBindGroup({
+        label: 'Gauss bind group 0',
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries: [{binding: 0, resource: this.tempView}, {binding: 1, resource: this.outViews[index]}, {
+          binding: 2,
+          resource: {buffer: this.verticalParam}
+        }, {binding: 3, resource: {buffer: kernel}},]
+      }))
+      computePass.dispatchWorkgroups(...verticalWorkGroups)
+    }
+    computePass.end()
+    commandEncoder.copyTextureToBuffer({texture: this.outputTexture, origin: [0, 0, 4]}, {
+      buffer: this.outputBuffer,
+      bytesPerRow
+    }, [this.outputWidth, this.outputHeight, 1])
+    return commandEncoder.finish()
+  }
+
+  async encodeSinglePass (callHorizontal, callVertical, horizontalWorkGroups, verticalWorkGroups) {
+    const commandEncoder = this.device.createCommandEncoder()
+    // Calculate bytesPerRow, which must be a multiple of 256 for WebGPU
+    const bytesPerRow = Math.ceil((this.outputWidth * 4) / 256) * 256
+    const computePass = commandEncoder.beginComputePass({
+      label: 'Gaussian compute pass',
     })
     computePass.setPipeline(this.pipeline)
     let vInput
     let vOutput = this.outViews[1]
     let outCopyOrig
     if (callHorizontal) {
-      computePass.setBindGroup(0, device.createBindGroup({
+      computePass.setBindGroup(0, this.device.createBindGroup({
         label: 'Gauss bind group 0',
         layout: this.pipeline.getBindGroupLayout(0),
-        entries: [
-          {binding: 0, resource: this.outViews[0]},
-          {binding: 1, resource: this.tempView},
-          {binding: 2, resource: {buffer: this.horizontalParam}},
-          {binding: 3, resource: {buffer: this.kernelBuffer}},
-        ]
+        entries: [{binding: 0, resource: this.outViews[0]}, {binding: 1, resource: this.tempView}, {
+          binding: 2, resource: {buffer: this.horizontalParam}
+        }, {binding: 3, resource: {buffer: this.kernelBuffers[0]}},]
       }))
       computePass.dispatchWorkgroups(...horizontalWorkGroups)
       outCopyOrig = {texture: this.tempTexture, origin: [0, 0, 0]}
@@ -132,47 +160,42 @@ class AllocatedRadialShader {
       outCopyOrig = {texture: this.outputTexture, origin: [0, 0, 0]}
     }
     if (callVertical) {
-      computePass.setBindGroup(0, device.createBindGroup({
+      computePass.setBindGroup(0, this.device.createBindGroup({
         label: 'Gauss bind group 0',
         layout: this.pipeline.getBindGroupLayout(0),
-        entries: [
-          {binding: 0, resource: vInput},
-          {binding: 1, resource: vOutput},
-          {binding: 2, resource: {buffer: this.verticalParam}},
-          {binding: 3, resource: {buffer: this.kernelBuffer}},
-        ]
+        entries: [{binding: 0, resource: vInput}, {binding: 1, resource: vOutput}, {
+          binding: 2, resource: {buffer: this.verticalParam}
+        }, {binding: 3, resource: {buffer: this.kernelBuffers[0]}},]
       }))
 
       computePass.dispatchWorkgroups(...verticalWorkGroups)
       outCopyOrig = {texture: this.outputTexture, origin: [0, 0, 1]}
     }
     computePass.end()
-    commandEncoder.copyTextureToBuffer(
-      outCopyOrig,
-      {buffer: outputBuffer, bytesPerRow},
-      [this.outputWidth, this.outputHeight, 1]
-    )
-    commandEncoder.resolveQuerySet(querySet, 0, querySet.count, resolveBuffer, 0)
-    commandEncoder.copyBufferToBuffer(resolveBuffer, 0, resultBuffer, 0, resultBuffer.size)
-    console.log('Submitting command buffer to GPU queue')
-    device.queue.submit([commandEncoder.finish()])
+    commandEncoder.copyTextureToBuffer(outCopyOrig, {
+      buffer: this.outputBuffer, bytesPerRow
+    }, [this.outputWidth, this.outputHeight, 1])
+    return commandEncoder.finish()
+  }
+
+  async runShader () {
+    console.time('runShader')
+    const bytesPerRow = Math.ceil((this.outputWidth * 4) / 256) * 256
+    const device = this.shader.device
+
+    console.log('Submitting command buffer to GPU queue', this.encodedCommands)
+    device.queue.submit([this.encodedCommands])
     await device.queue.onSubmittedWorkDone()
-    await resultBuffer.mapAsync(GPUMapMode.READ)
-    const times = new BigInt64Array(resultBuffer.getMappedRange())
-    let gpuTime = (Number(times[1] - times[0]) / 1000).toFixed(1) + 'µs'
-    console.log('GPU time', gpuTime)
-    this.gpuTime = gpuTime
-    resultBuffer.unmap()
-    await outputBuffer.mapAsync(GPUMapMode.READ)
+
+    await this.outputBuffer.mapAsync(GPUMapMode.READ)
     try {
       console.time('result copy')
-      const outputData = new Uint8ClampedArray(outputBuffer.getMappedRange()).slice()
+      const outputData = new Uint8ClampedArray(this.outputBuffer.getMappedRange()).slice()
       let outputImage = new ImageData(outputData, bytesPerRow / 4, this.outputHeight)
       console.timeEnd('result copy')
       return outputImage
     } finally {
-      outputBuffer.unmap()
-      outputBuffer.destroy()
+      this.outputBuffer.unmap()
       console.timeEnd('runShader')
     }
   }
@@ -180,9 +203,8 @@ class AllocatedRadialShader {
 
 export class RadialShader {
 
-  constructor (device, pipelineLayout, pipelineDesc, defs, module) {
+  constructor (device, pipelineDesc, defs, module) {
     this.device = device
-    this.pipelineLayout = pipelineLayout
     this.pipelineDesc = pipelineDesc
     this.defs = defs
     this.module = module
@@ -191,32 +213,30 @@ export class RadialShader {
   static async createShader (device) {
     const shaderCode = await (await fetch('radial.wgsl')).text()
     const defs = makeShaderDataDefinitions(shaderCode)
+    console.log('DEF', defs)
+    const pipelineDescs = Object.fromEntries(Object.entries(defs.entryPoints).map(([key, v], _) =>
+      [key, {label: `${key} pipeline`, layout: 'auto', compute: {entryPoint: key, constants: {}}}]))
+    console.log(pipelineDescs)
     // partial pipeline to generate layout
     const pipelineDesc = {
-      label: 'Gaussian Blur Pipeline Test',
-      layout: 'auto',
-      compute: {
-        entryPoint: 'single_pass_radial',
-        constants: {},
+      label: 'Gaussian Blur Pipeline Test', layout: 'auto', compute: {
+        entryPoint: 'single_pass_radial', constants: {},
       }
     }
-    const descriptors = makeBindGroupLayoutDescriptors(defs, pipelineDesc)
-    const bindGroupLayouts = descriptors.map(d => device.createBindGroupLayout(d))
-    const pipelineLayout = device.createPipelineLayout({bindGroupLayouts: bindGroupLayouts})
     const module = device.createShaderModule({
-      label: 'Gaussian Blur Shader Test',
-      code: shaderCode,
+      label: 'Gaussian Blur Shader Test', code: shaderCode,
     })
-    return new RadialShader(device, pipelineLayout, pipelineDesc, defs, module)
+    let shader = new RadialShader(device, pipelineDesc, defs, module)
+    shader.uniformsView = makeStructuredView(shader.defs.uniforms.parameters)
+    return shader
   }
 
-  async createGPUResources (workgroupSize, inputImage, outputWidth, outputHeight, kernelBuffer) {
+  async createGPUResources (workgroupSize, inputImage, outputWidth, outputHeight, kernels, oneDirection = null) {
     this.pipelineDesc.compute.constants.workgroup_size = workgroupSize
     let pipelineDesc = structuredClone(this.pipelineDesc)
     console.log('pipelineDesc', JSON.stringify(pipelineDesc))
-    pipelineDesc.layout = this.pipelineLayout
     pipelineDesc.compute.module = this.module
-    return AllocatedRadialShader.createGPUResources(this, pipelineDesc, inputImage, outputWidth, outputHeight, kernelBuffer)
+    return AllocatedRadialShader.createGPUResources(this, pipelineDesc, inputImage, outputWidth, outputHeight, kernels, oneDirection)
   }
 
 }

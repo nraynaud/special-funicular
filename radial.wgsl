@@ -13,6 +13,7 @@ struct Params {
 @group(0) @binding(1) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var<uniform> parameters: Params;
 @group(0) @binding(3) var<storage> kernel: array<f32>;
+@group(0) @binding(4) var inputSampler: sampler;
 
 var<workgroup> workgroupPixels: array<u32, workgroup_pixel_count>;
 var<workgroup> current_kernel_radius: u32;
@@ -115,4 +116,17 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
         result.a = 1.0;
         textureStore(outputTexture, pixel_pos, result);
     }
+}
+
+@compute @workgroup_size(8, 8)
+fn downsample(@builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>) {
+    let outputSize =textureDimensions(outputTexture);
+    var pixel_pos = global_id.xy;
+    if any(pixel_pos >= outputSize) {
+        return;
+    }
+    let pix = textureSampleLevel(inputTexture, inputSampler, vec2f(pixel_pos) / vec2f(outputSize), 0);
+    textureStore(outputTexture, pixel_pos, pix);
 }
