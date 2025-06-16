@@ -1,19 +1,20 @@
 override workgroup_size = 64;
-override convert_to_gray = 0;
-const use_workgroup_mem = 0;
+const use_workgroup_mem = 1;
 override workgroup_pixel_count = 16300/4;
 
 struct Params {
     horizontal: u32,
     from_mip: u32,
     convert_to_gray: u32,
-    operation: u32,
+    diff_index: u32
 };
 
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;
 @group(0) @binding(1) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var<uniform> parameters: Params;
 @group(0) @binding(3) var<storage> kernel: array<f32>;
+@group(0) @binding(4) var diff_input_stack: texture_2d_array<f32>;
+@group(0) @binding(5) var diff_output_stack: texture_storage_2d_array<rgba8unorm, write>;
 
 var<workgroup> workgroupPixels: array<u32, workgroup_pixel_count>;
 var<workgroup> current_kernel_radius: u32;
@@ -103,7 +104,7 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
             } else {
                 texel = read_input(pixReadPos * io_ratio);
             }
-            if convert_to_gray != 0 {
+            if parameters.convert_to_gray != 0 {
                 texel = to_gray(texel);
             }
             sum += texel * weight;
@@ -120,15 +121,13 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
     }
 }
 
-@compute @workgroup_size(8, 8)
-fn downsample(@builtin(global_invocation_id) global_id: vec3<u32>,
+@compute @workgroup_size(8, 8, 1)
+fn subtract(@builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>) {
-    let outputSize = textureDimensions(outputTexture);
-    var pixel_pos = global_id.xy;
-    if any(pixel_pos >= outputSize) {
-        return;
+    let pixel_pos = vec2i(global_id.xy);
+    if all(pixel_pos >= vec2i(0)) && all(pixel_pos < vec2i(textureDimensions(diff_input_stack, parameters.from_mip)) ) {
+        let pix = textureLoad(diff_input_stack, pixel_pos, parameters.diff_index, parameters.from_mip);
+        textureStore(diff_output_stack, pixel_pos, parameters.diff_index, pix);
     }
-    let pix = textureLoad(inputTexture, pixel_pos, parameters.from_mip);
-    textureStore(outputTexture, pixel_pos, pix);
 }

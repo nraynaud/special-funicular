@@ -1,5 +1,5 @@
 import {
-  dogShader, HORIZONTAL, RadialShader, VERTICAL,
+  HORIZONTAL, RadialShader, VERTICAL,
 } from './sift-shaders.js'
 
 export async function runShaderTests () {
@@ -26,7 +26,6 @@ export async function runShaderTests () {
     })
 
     await testGaussianBlurShader(device)
-    await testDogShader(device)
 
   } catch (error) {
     console.error('Error running shader tests:', error)
@@ -236,11 +235,16 @@ export async function testGaussianBlurShader (device) {
       allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, gs)
       outputImage = await allocatedShader.runShader()
       console.time('imageTest')
+      const index = 3
+      const mipLevel = 4
+      await assert.imageTest(testImage, await allocatedShader.getOutputTexture(index, mipLevel), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
+
       for (let mipLevel = 0; mipLevel < 10; mipLevel++) {
         for (let index = 0; index < gaussians.length; index++) {
           await assert.imageTest(testImage, await allocatedShader.getOutputTexture(index, mipLevel), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
         }
       }
+
       console.timeEnd('imageTest')
     } catch (error) {
       console.error('Error testing Gaussian Blur Shader:', error)
@@ -248,130 +252,3 @@ export async function testGaussianBlurShader (device) {
     }
   })
 }
-
-// Test for DoG (Difference of Gaussians) Shader
-export async function testDogShader (device) {
-  console.log('Testing DoG Shader...')
-
-  // Create QUnit test
-  QUnit.test('DoG (Difference of Gaussians) Shader', async assert => {
-    try {
-      // Create shader module
-      const dogModule = device.createShaderModule({
-        label: 'DoG Shader Test', code: dogShader
-      })
-
-      // Create compute pipeline
-      const dogPipeline = device.createComputePipeline({
-        label: 'DoG Pipeline Test', layout: 'auto', compute: {
-          module: dogModule, entryPoint: 'main'
-        }
-      })
-
-      // Test 1: Verify shader compilation
-      assert.ok(dogPipeline, 'Shader compiled successfully')
-
-      // Test 2: Verify DoG computation
-      const width = 32
-      const height = 32
-
-      // Create two input textures with different patterns
-      // First texture: uniform gray
-      const texture1Data = new Uint8Array(width * height * 4)
-      texture1Data.fill(128) // Fill with gray (128, 128, 128, 255)
-      for (let i = 0; i < width * height; i++) {
-        texture1Data[i * 4 + 3] = 255 // Set alpha to 255
-      }
-
-      const texture1 = device.createTexture({
-        size: [width, height], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
-      })
-
-      device.queue.writeTexture({texture: texture1}, texture1Data, {bytesPerRow: width * 4}, [width, height])
-
-      // Second texture: darker gray
-      const texture2Data = new Uint8Array(width * height * 4)
-      texture2Data.fill(64) // Fill with darker gray (64, 64, 64, 255)
-      for (let i = 0; i < width * height; i++) {
-        texture2Data[i * 4 + 3] = 255 // Set alpha to 255
-      }
-
-      const texture2 = device.createTexture({
-        size: [width, height], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
-      })
-
-      device.queue.writeTexture({texture: texture2}, texture2Data, {bytesPerRow: width * 4}, [width, height])
-
-      // Create output texture
-      const outputTexture = device.createTexture({
-        size: [width, height], format: 'rgba8unorm', usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC
-      })
-
-      // Create bind group
-      const bindGroup = device.createBindGroup({
-        layout: dogPipeline.getBindGroupLayout(0),
-        entries: [{binding: 0, resource: texture1.createView()}, {
-          binding: 1,
-          resource: texture2.createView()
-        }, {binding: 2, resource: outputTexture.createView()}]
-      })
-
-      // Run the shader
-      const commandEncoder = device.createCommandEncoder()
-      const computePass = commandEncoder.beginComputePass()
-      computePass.setBindGroup(0, bindGroup)
-      computePass.setPipeline(dogPipeline)
-      computePass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16))
-      computePass.end()
-      device.queue.submit([commandEncoder.finish()])
-
-      // Read back the results
-      const outputData = await readTextureData(device, outputTexture, width, height)
-
-      // Verify that the DoG computation is correct
-      // The difference should be stored in the R channel
-      // Expected difference: 128 - 64 = 64 (scaled by luminance weights)
-      // Luminance weights: 0.299, 0.587, 0.114
-      // Expected luminance: (128 - 64) * 0.299 + (128 - 64) * 0.587 + (128 - 64) * 0.114 = 64
-
-      const expectedDifference = 64 * (0.299 + 0.587 + 0.114)
-      const tolerance = 5 // Allow some tolerance due to floating point precision
-
-      // Check a few pixels
-      let allPixelsCorrect = true
-      let incorrectPixelValue = null
-
-      for (let i = 0; i < 5; i++) {
-        const index = i * 100 * 4 // Check a few scattered pixels
-        const actualDifference = outputData[index] // R channel
-
-        if (Math.abs(actualDifference - expectedDifference) > tolerance) {
-          allPixelsCorrect = false
-          incorrectPixelValue = actualDifference
-          break
-        }
-      }
-
-      assert.ok(allPixelsCorrect, incorrectPixelValue === null ? 'DoG computation correctly calculated the difference' : `DoG computation incorrect. Expected ~${expectedDifference}, got ${incorrectPixelValue}`)
-
-      // Create ImageData objects for input and output images
-      const inputImageData1 = new ImageData(new Uint8ClampedArray(texture1Data), width, height)
-      const inputImageData2 = new ImageData(new Uint8ClampedArray(texture2Data), width, height)
-      const outputImageData = new ImageData(new Uint8ClampedArray(outputData), width, height)
-
-      // Display input and output images for this assertion
-      await assert.imageTest(inputImageData1, outputImageData, 'DoG: Input 1 and output images', allPixelsCorrect)
-      await assert.imageTest(inputImageData2, outputImageData, 'DoG: Input 2 and output images', allPixelsCorrect)
-
-      // Clean up
-      texture1.destroy()
-      texture2.destroy()
-      outputTexture.destroy()
-
-    } catch (error) {
-      console.error('Error testing DoG Shader:', error)
-      assert.ok(false, `Error testing DoG Shader: ${error.message}`)
-    }
-  })
-}
-
