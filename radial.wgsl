@@ -127,7 +127,10 @@ fn subtract(@builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>) {
     let pixel_pos = vec2i(global_id.xy);
     if all(pixel_pos >= vec2i(0)) && all(pixel_pos < vec2i(textureDimensions(diff_input_stack, parameters.from_mip)) ) {
-        let pix = textureLoad(diff_input_stack, pixel_pos, parameters.diff_index, parameters.from_mip);
-        textureStore(diff_output_stack, pixel_pos, parameters.diff_index, pix);
+        let pix1 = textureLoad(diff_input_stack, pixel_pos, parameters.diff_index, parameters.from_mip);
+        let pix2 = textureLoad(diff_input_stack, pixel_pos, parameters.diff_index+1, parameters.from_mip);
+        var diff = (pix1 - pix2);
+        diff.a = 1.0;
+        textureStore(diff_output_stack, pixel_pos, parameters.diff_index, diff);
     }
 }

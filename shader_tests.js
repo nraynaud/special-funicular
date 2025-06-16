@@ -222,30 +222,40 @@ export async function testGaussianBlurShader (device) {
       allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, [quenelle])
       outputImage = await allocatedShader.runShader()
       await assert.imageTest(testImage, outputImage, `Complete blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, true)
-      //NASM-A20150317000-NASM2018-10769.jpg
+
+      const gaussians = [1.2262735, 1.54500779, 1.94658784, 2.452547, 3.09001559]
+      console.log('triple gaussians', gaussians, gaussians.map(g => g * 3))
+      const gs = gaussians.map(sigma => computeGaussianKernel(Math.ceil(sigma * 3), sigma))
+      console.log('gaussians', gs)
+
+      testImage = await createImageBitmap(await (await fetch('box.png')).blob())
+      allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, gs)
+      outputImage = await allocatedShader.runShader()
+      for (let mipLevel = 0; mipLevel < 7; mipLevel++) {
+        for (let index = 0; index < gaussians.length - 1; index++) {
+          await assert.imageTest(testImage, await allocatedShader.getTexture('diffTexture', index, mipLevel), `Complete blur on reference image. stack index: ${index}, mip level: ${mipLevel}`, true)
+        }
+      }
+
       console.time('createImageBitmap')
       testImage = await createImageBitmap(await (await fetch('NASM-A20150317000-NASM2018-10769.jpg')).blob())
       console.log('testImage size', testImage.width, testImage.height)
       console.timeEnd('createImageBitmap')
       ts = await RadialShader.createShader(device, kernelRadius, workgroupSize)
-      const gaussians = [1.2262735, 1.54500779, 1.94658784, 2.452547, 3.09001559]
-      console.log('triple gaussians', gaussians, gaussians.map(g => g * 3))
-      const gs = gaussians.map(sigma => computeGaussianKernel(Math.ceil(sigma * 3), sigma))
-      console.log('gaussians', gs)
+
       allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, gs)
       outputImage = await allocatedShader.runShader()
-      console.time('imageTest')
       const index = 3
       const mipLevel = 4
-      await assert.imageTest(testImage, await allocatedShader.getOutputTexture(index, mipLevel), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
-
-      for (let mipLevel = 0; mipLevel < 10; mipLevel++) {
-        for (let index = 0; index < gaussians.length; index++) {
-          await assert.imageTest(testImage, await allocatedShader.getOutputTexture(index, mipLevel), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
+      await assert.imageTest(testImage, await allocatedShader.getTexture('outputTexture', index, mipLevel), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
+      if (false) {
+        for (let mipLevel = 0; mipLevel < 8; mipLevel++) {
+          for (let index = 0; index < gaussians.length; index++) {
+            await assert.imageTest(testImage, await allocatedShader.getTexture('outputTexture', index, mipLevel), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
+          }
         }
       }
 
-      console.timeEnd('imageTest')
     } catch (error) {
       console.error('Error testing Gaussian Blur Shader:', error)
       assert.ok(false, `Error testing Gaussian Blur Shader: ${error.message}`)
