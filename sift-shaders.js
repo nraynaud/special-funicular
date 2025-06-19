@@ -50,7 +50,7 @@ class AllocatedRadialShader {
       label: 'diff',
       size: [outputWidth, outputHeight, Math.max(1, kernels.length - 1)],
       mipLevelCount: mipLevels,
-      format: 'rgba8unorm',
+      format: 'r32sint',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
     })
     resources.diffTextureView = []
@@ -72,6 +72,7 @@ class AllocatedRadialShader {
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING
     })
     const copySize = [inputImage.width, inputImage.height, 1]
+    console.log('#image size', copySize)
     // should handle both ImageBitmap and ImageData
     shader.device.queue.copyExternalImageToTexture({source: inputImage}, {
       texture: resources.outputTexture, origin: [0, 0, 0]
@@ -198,13 +199,6 @@ class AllocatedRadialShader {
       }
     }
     computePass.end()
-
-    const copyMipLevel = 0
-    const mipRatio = 2 ** copyMipLevel
-    const bytesPerRow = Math.ceil((this.outputWidth * 4) / 256) * 256
-    commandEncoder.copyTextureToBuffer({texture: this.outputTexture, origin: [0, 0, 4], mipLevel: copyMipLevel},
-      {buffer: this.outputBuffer, bytesPerRow},
-      [Math.floor(this.outputWidth / mipRatio), Math.floor(this.outputHeight / mipRatio), 1])
     return commandEncoder.finish()
   }
 
@@ -278,7 +272,8 @@ class AllocatedRadialShader {
     await this.outputBuffer.mapAsync(GPUMapMode.READ)
     try {
       const outputData = new Uint8ClampedArray(this.outputBuffer.getMappedRange()).slice(0, bytesPerRow * outH)
-      return createImageBitmap(new ImageData(outputData, bytesPerRow / 4, outH), 0, 0, outW, outH)
+      // createImageBitmap() cuts the extra pixels caused by the x256 bytes per row alignment
+      return await createImageBitmap(new ImageData(outputData, bytesPerRow / 4, outH), 0, 0, outW, outH)
     } finally {
       this.outputBuffer.unmap()
     }

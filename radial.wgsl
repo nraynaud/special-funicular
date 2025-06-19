@@ -1,5 +1,5 @@
 override workgroup_size = 64;
-const use_workgroup_mem = 1;
+const use_workgroup_mem = 0;
 override workgroup_pixel_count = 16300/4;
 
 struct Params {
@@ -14,7 +14,7 @@ struct Params {
 @group(0) @binding(2) var<uniform> parameters: Params;
 @group(0) @binding(3) var<storage> kernel: array<f32>;
 @group(0) @binding(4) var diff_input_stack: texture_2d_array<f32>;
-@group(0) @binding(5) var diff_output_stack: texture_storage_2d_array<rgba8unorm, write>;
+@group(0) @binding(5) var diff_output_stack: texture_storage_2d_array<r32sint, write>;
 
 var<workgroup> workgroupPixels: array<u32, workgroup_pixel_count>;
 var<workgroup> current_kernel_radius: u32;
@@ -129,8 +129,6 @@ fn subtract(@builtin(global_invocation_id) global_id: vec3<u32>,
     if all(pixel_pos >= vec2i(0)) && all(pixel_pos < vec2i(textureDimensions(diff_input_stack, parameters.from_mip)) ) {
         let pix1 = textureLoad(diff_input_stack, pixel_pos, parameters.diff_index, parameters.from_mip);
         let pix2 = textureLoad(diff_input_stack, pixel_pos, parameters.diff_index+1, parameters.from_mip);
-        var diff = (pix1 - pix2);
-        diff.a = 1.0;
-        textureStore(diff_output_stack, pixel_pos, parameters.diff_index, diff);
+        textureStore(diff_output_stack, pixel_pos, parameters.diff_index, vec4i(i32((pix2.r - pix1.r) * pow(2, 31))));
     }
 }

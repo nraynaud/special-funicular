@@ -193,9 +193,12 @@
     })
   }
 
-  function showInCanvas (canvasElement, imageData) {
+  async function showInCanvas (canvasElement, imageData) {
     canvasElement.width = imageData.width
     canvasElement.height = imageData.height
+    canvasElement.style.backgroundColor = '#000'
+    // avoid using "bitmaprenderer", because transferFromImageBitmap() detach the bitmap when drawing.
+    // detached bitmaps can't be drawn again.
     const ctx = canvasElement.getContext('2d')
     if (imageData instanceof ImageData) {
       ctx.putImageData(imageData, 0, 0)
@@ -211,13 +214,12 @@
       const canvasElement = document.createElement('canvas')
       canvasElement.width = imageData.width
       canvasElement.height = imageData.height
-      showInCanvas(canvasElement, imageData)
+      await showInCanvas(canvasElement, imageData)
 
       const img = canvasElement
       img.className = 'test-image'
       img.title = 'Click to enlarge'
       img.onclick = () => { showImageModal(imageData)}
-
 
       const imgContainer = document.createElement('div')
       imgContainer.style.marginTop = '10px'
@@ -480,50 +482,6 @@
     logDiv.scrollTop = logDiv.scrollHeight
   }
 
-  // Function to send errors to the AI
-  function sendErrorToAI (errorMessage) {
-    // Create a visible notification that the error is being sent to the AI
-    const notificationDiv = document.createElement('div')
-    notificationDiv.style.position = 'fixed'
-    notificationDiv.style.top = '10px'
-    notificationDiv.style.right = '10px'
-    notificationDiv.style.backgroundColor = '#ffdddd'
-    notificationDiv.style.padding = '10px'
-    notificationDiv.style.borderRadius = '5px'
-    notificationDiv.style.boxShadow = '0 0 10px rgba(0,0,0,0.2)'
-    notificationDiv.style.zIndex = '1000'
-    notificationDiv.textContent = 'Error sent to AI for analysis'
-    document.body.appendChild(notificationDiv)
-
-    // Remove the notification after 3 seconds
-    setTimeout(() => {
-      document.body.removeChild(notificationDiv)
-    }, 3000)
-
-    // In a real implementation, this would send the error to a server
-    // For demonstration purposes, we'll just log it with a special prefix
-    originalConsoleLog.call(console, 'AI_ERROR_LOG:', errorMessage)
-
-    // Create a special element that contains the error data for the AI to see
-    const aiDataElement = document.createElement('div')
-    aiDataElement.id = 'ai-error-data'
-    aiDataElement.style.display = 'none'
-    aiDataElement.textContent = JSON.stringify({
-      timestamp: new Date().toISOString(),
-      error: errorMessage,
-      userAgent: navigator.userAgent,
-      url: window.location.href
-    })
-
-    // Remove any existing AI data elements
-    const existingElement = document.getElementById('ai-error-data')
-    if (existingElement) {
-      document.body.removeChild(existingElement)
-    }
-
-    document.body.appendChild(aiDataElement)
-  }
-
   console.error = function () {
     const args = Array.from(arguments)
     originalConsoleError.apply(console, args)
@@ -535,9 +493,6 @@
 
     logDiv.innerHTML += `<div style="color: red">[ERROR] ${message}</div>`
     logDiv.scrollTop = logDiv.scrollHeight
-
-    // Send error to a logging service that the AI can access
-    sendErrorToAI(message)
   }
 
   // Function to create a simple test image with a single feature

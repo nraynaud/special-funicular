@@ -15,7 +15,10 @@ export async function runShaderTests () {
       assert.ok(adapter, 'No appropriate GPU adapter found')
     })
     const device = await adapter.requestDevice({
-      label: 'Shader Test Device', requiredFeatures: ['timestamp-query'], requiredLimits: {maxTextureDimension2D: 16384}
+      label: 'Shader Test Device', requiredLimits: {maxTextureDimension2D: 16384}
+    })
+    device.addEventListener('uncapturederror', (event) => {
+      console.error(event.error.message)
     })
     QUnit.module('Shader Tests', {
       before: function () {
