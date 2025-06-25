@@ -2,9 +2,7 @@
 // This module contains shared shader code used by both the worker and test files
 
 // SIFT implementation constants
-import {
-  makeShaderDataDefinitions, makeStructuredView
-} from './lib/webgpu-utils.module.js'
+import { makeShaderDataDefinitions, makeStructuredView } from './lib/webgpu-utils.module.js'
 
 export const NUM_OCTAVES = 4
 export const SCALES_PER_OCTAVE = 5
@@ -16,6 +14,18 @@ export const MAX_KEYPOINTS = 10000
 
 export const HORIZONTAL = 1
 export const VERTICAL = 2
+
+function createMipViewArray (texture, params = {}) {
+  const result = []
+  for (let i = 0; i < texture.mipLevelCount; i++) {
+    result.push(texture.createView({
+      mipLevelCount: 1,
+      baseMipLevel: i,
+      ...params
+    }))
+  }
+  return result
+}
 
 class AllocatedRadialShader {
   constructor (shader) {
@@ -39,11 +49,19 @@ class AllocatedRadialShader {
     resources.uniformsView = shader.uniformsView
     const mipLevels = Math.floor(Math.log2(Math.min(outputWidth, outputHeight)))
     console.log('mipLevels', mipLevels)
+    resources.rgbaTexture = shader.device.createTexture({
+      label: 'input',
+      size: [outputWidth, outputHeight, 1],
+      mipLevelCount: 1,
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
+    })
+    resources.rgbaTextureView = resources.rgbaTexture.createView()
     resources.outputTexture = shader.device.createTexture({
       label: 'output',
       size: [outputWidth, outputHeight, kernels.length],
       mipLevelCount: mipLevels,
-      format: 'rgba8unorm',
+      format: 'r32sint',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
     })
     resources.diffTexture = shader.device.createTexture({
@@ -53,14 +71,15 @@ class AllocatedRadialShader {
       format: 'r32sint',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
     })
-    resources.diffTextureView = []
-    for (let i = 0; i < mipLevels; i++) {
-      resources.diffTextureView.push(resources.diffTexture.createView({
-        dimension: '2d-array',
-        mipLevelCount: 1,
-        baseMipLevel: i
-      }))
-    }
+    resources.diffTextureView = createMipViewArray(resources.diffTexture)
+    resources.maxTexture = shader.device.createTexture({
+      label: 'maxTexture',
+      size: [outputWidth, outputHeight, Math.max(1, resources.diffTexture.depthOrArrayLayers - 2)],
+      mipLevelCount: mipLevels,
+      format: 'r32sint',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
+    })
+    resources.maxTextureView = createMipViewArray(resources.maxTexture)
     resources.outViewsArray = resources.outputTexture.createView({
       dimension: '2d-array'
     })
@@ -68,36 +87,24 @@ class AllocatedRadialShader {
       label: 'temp',
       size: [outputWidth, outputHeight],
       mipLevelCount: mipLevels,
-      format: 'rgba8unorm',
+      format: 'r32sint',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING
     })
     const copySize = [inputImage.width, inputImage.height, 1]
     console.log('#image size', copySize)
     // should handle both ImageBitmap and ImageData
     shader.device.queue.copyExternalImageToTexture({source: inputImage}, {
-      texture: resources.outputTexture, origin: [0, 0, 0]
+      texture: resources.rgbaTexture, origin: [0, 0, 0]
     }, copySize)
     resources.tempView = resources.tempTexture.createView({dimension: '2d'})
-    resources.tempViewStorage = []
-    for (let mip = 0; mip < resources.tempTexture.mipLevelCount; mip++) {
-      resources.tempViewStorage.push(resources.tempTexture.createView({
-        dimension: '2d',
-        mipLevelCount: 1,
-        baseMipLevel: mip
-      }))
-    }
+    resources.tempViewStorage = createMipViewArray(resources.tempTexture)
     resources.outViewsStorage = []
     resources.outViewMipmap = []
     for (let i = 0; i < resources.outputTexture.depthOrArrayLayers; i++) {
-      resources.outViewsStorage.push([])
+      resources.outViewsStorage.push(createMipViewArray(resources.outputTexture, {dimension: '2d', baseArrayLayer: i}))
       resources.outViewMipmap.push(resources.outputTexture.createView({
         dimension: '2d', baseArrayLayer: i
       }))
-      for (let j = 0; j < resources.outputTexture.mipLevelCount; j++) {
-        resources.outViewsStorage[i].push(resources.outputTexture.createView({
-          dimension: '2d', baseArrayLayer: i, mipLevelCount: 1, baseMipLevel: j
-        }))
-      }
     }
     console.log(resources.outViewsStorage)
     const bytesPerRow = Math.ceil((outputWidth * 4) / 256) * 256
@@ -127,18 +134,59 @@ class AllocatedRadialShader {
     return buff
   }
 
+  async encodeConvertToGray (computePass) {
+    computePass.setPipeline(this.pipelines['convert_to_gray'])
+    computePass.setBindGroup(0, this.device.createBindGroup({
+      label: 'gray bind group 0',
+      layout: this.pipelines['convert_to_gray'].getBindGroupLayout(0),
+      entries: [
+        {binding: 2, resource: {buffer: this.createUniformBuffer({from_mip: 0})}},
+        {binding: 8, resource: this.rgbaTextureView},
+        {binding: 9, resource: this.outViewsStorage[0][0]}]
+    }))
+    computePass.dispatchWorkgroups(Math.ceil(this.outputWidth / 8), Math.ceil(this.outputHeight / 8))
+  }
+
+  async encodeConvertFromGray (computePass, inputTextureView, convertNegative = false) {
+    const pipeline = this.pipelines['convert_from_gray']
+    computePass.setPipeline(pipeline)
+    computePass.setBindGroup(0, this.device.createBindGroup({
+      label: 'from gray bind group 0',
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        {binding: 0, resource: inputTextureView},
+        {
+          binding: 2,
+          resource: {buffer: this.createUniformBuffer({from_mip: 0, from_gray_negative: convertNegative ? 1 : 0})}
+        },
+        {binding: 10, resource: this.rgbaTextureView}]
+    }))
+    computePass.dispatchWorkgroups(Math.ceil(this.outputWidth / 8), Math.ceil(this.outputHeight / 8))
+  }
+
+  mipSize (mipLevel) {
+    const mipsRatio = 2 ** mipLevel
+    return [this.outputWidth, this.outputHeight].map(d => Math.floor(d / mipsRatio))
+  }
+
+  workgroups88Mip (mipLevel) {
+    return this.mipSize(mipLevel).map(d => Math.ceil(d / 8))
+  }
+
   async encodeRepeatedPasses (workgroupSize) {
-    const commandEncoder = this.device.createCommandEncoder()
-    const computePass = commandEncoder.beginComputePass({
-      label: 'Gaussian compute pass',
+    const commandEncoder = this.device.createCommandEncoder({
+      label: 'encodeRepeatedPasses'
     })
+    const computePass = commandEncoder.beginComputePass({
+      label: 'Gaussian repeated compute pass',
+    })
+    await this.encodeConvertToGray(computePass)
     let gaussPipeline = this.pipelines['single_pass_radial']
     computePass.setPipeline(gaussPipeline)
     for (let mipLevel = 0; mipLevel < this.outputTexture.mipLevelCount; mipLevel++) {
       let inputMipLevel = mipLevel === 0 ? 0 : mipLevel - 1
       let inputTexture = mipLevel === 0 ? this.outViewMipmap[0] : this.outViewMipmap[this.outViewMipmap.length - 3]
-      const mipsRatio = 2 ** mipLevel
-      const [outputWidth, outputHeight] = [this.outputWidth, this.outputHeight].map(d => Math.floor(d / mipsRatio))
+      const [outputWidth, outputHeight] = this.mipSize(mipLevel)
       const horizontalWorkGroups = [Math.ceil(outputWidth / workgroupSize), outputHeight]
       const verticalWorkGroups = [Math.ceil(outputHeight / workgroupSize), outputWidth]
       for (const [index, kernel] of this.kernelBuffers.entries()) {
@@ -177,29 +225,35 @@ class AllocatedRadialShader {
     let diffPipeline = this.pipelines['subtract']
     computePass.setPipeline(diffPipeline)
     for (let mip = 0; mip < this.outputTexture.mipLevelCount; mip++) {
-      for (let i = 0; i < this.kernelBuffers.length - 1; i++) {
-        computePass.setBindGroup(0, this.device.createBindGroup({
-          label: 'diff bind group 0',
-          layout: diffPipeline.getBindGroupLayout(0),
-          entries: [
-            {
-              binding: 2, resource: {
-                buffer: this.createUniformBuffer({
-                  from_mip: mip,
-                  convert_to_gray: 0,
-                  diff_index: i
-                })
-              }
-            },
-            {binding: 4, resource: this.outViewsArray},
-            {binding: 5, resource: this.diffTextureView[mip]}
-          ]
-        }))
-        computePass.dispatchWorkgroups(Math.ceil(this.outputWidth / 8), Math.ceil(this.outputHeight / 8))
-      }
+      computePass.setBindGroup(0, this.device.createBindGroup({
+        label: 'diff bind group 0',
+        layout: diffPipeline.getBindGroupLayout(0),
+        entries: [
+          {binding: 2, resource: {buffer: this.createUniformBuffer({from_mip: mip, convert_to_gray: 0})}},
+          {binding: 4, resource: this.outViewsArray},
+          {binding: 5, resource: this.diffTextureView[mip]}
+        ]
+      }))
+      const [wgW, wgH] = this.workgroups88Mip(mip)
+      computePass.dispatchWorkgroups(wgW, wgH, this.diffTexture.depthOrArrayLayers)
+    }
+    let extremaPipeline = this.pipelines['extrema']
+    computePass.setPipeline(extremaPipeline)
+    for (let mip = 0; mip < this.outputTexture.mipLevelCount; mip++) {
+      computePass.setBindGroup(0, this.device.createBindGroup({
+        layout: extremaPipeline.getBindGroupLayout(0),
+        entries: [
+          {binding: 5, resource: this.diffTextureView[mip]},
+          {binding: 7, resource: this.maxTextureView[mip]}
+        ]
+      }))
+      const [wgW, wgH] = this.workgroups88Mip(mip)
+      computePass.dispatchWorkgroups(wgW, wgH, this.maxTexture.depthOrArrayLayers)
     }
     computePass.end()
-    return commandEncoder.finish()
+    return commandEncoder.finish({
+      label: 'encodeRepeatedPasses'
+    })
   }
 
   async encodeSinglePass (callHorizontal, callVertical, horizontalWorkGroups, verticalWorkGroups) {
@@ -209,6 +263,7 @@ class AllocatedRadialShader {
     const computePass = commandEncoder.beginComputePass({
       label: 'Gaussian compute pass',
     })
+    await this.encodeConvertToGray(computePass)
     computePass.setPipeline(this.pipelines['single_pass_radial'])
     let vInput
     let vOutput = this.outViewsStorage[0][0]
@@ -228,11 +283,9 @@ class AllocatedRadialShader {
           }, {binding: 3, resource: {buffer: this.kernelBuffers[0]}},]
       }))
       computePass.dispatchWorkgroups(...horizontalWorkGroups)
-      outCopyOrig = {texture: this.tempTexture, origin: [0, 0, 0]}
       vInput = this.tempView
     } else {
       vInput = this.outViewsStorage[0][0]
-      outCopyOrig = {texture: this.tempTexture, origin: [0, 0, 0]}
       vOutput = this.tempViewStorage[0]
     }
     if (callVertical) {
@@ -251,8 +304,9 @@ class AllocatedRadialShader {
 
       computePass.dispatchWorkgroups(...verticalWorkGroups)
     }
+    await this.encodeConvertFromGray(computePass, this.tempView)
     computePass.end()
-    commandEncoder.copyTextureToBuffer(outCopyOrig, {
+    commandEncoder.copyTextureToBuffer({texture: this.rgbaTexture}, {
       buffer: this.outputBuffer, bytesPerRow
     }, [this.outputWidth, this.outputHeight, 1])
     return commandEncoder.finish()
@@ -264,7 +318,24 @@ class AllocatedRadialShader {
     let outW = Math.floor(this.outputWidth / mipRatio)
     let outH = Math.floor(this.outputHeight / mipRatio)
     const bytesPerRow = Math.ceil((outW * 4) / 256) * 256
-    commandEncoder.copyTextureToBuffer({texture: this[name], origin: [0, 0, index], mipLevel: mipLevel},
+    let texture = this[name]
+    let sourceTexture = {texture: texture, origin: [0, 0, index], mipLevel: mipLevel}
+    if (texture.format === 'r32sint') {
+      const computePass = commandEncoder.beginComputePass({
+        label: 'gray to RGBA compute pass',
+      })
+      computePass.setPipeline(this.pipelines['single_pass_radial'])
+      await this.encodeConvertFromGray(computePass, texture.createView({
+        dimension: '2d',
+        baseMipLevel: mipLevel,
+        baseArrayLayer: index,
+        mipLevelCount: 1,
+        arrayLayerCount: 1
+      }), texture === this.diffTexture)
+      computePass.end()
+      sourceTexture = {texture: this.rgbaTexture, origin: [0, 0, 0], mipLevel: 0}
+    }
+    commandEncoder.copyTextureToBuffer(sourceTexture,
       {buffer: this.outputBuffer, bytesPerRow},
       [outW, outH, 1])
     this.device.queue.submit([commandEncoder.finish()])
@@ -284,7 +355,7 @@ class AllocatedRadialShader {
     const bytesPerRow = Math.ceil((this.outputWidth * 4) / 256) * 256
     const device = this.shader.device
 
-    console.log('Submitting command buffer to GPU queue', this.encodedCommands)
+    console.log('Submitting command buffer to GPU queue', this.encodedCommands.label)
     device.queue.submit([this.encodedCommands])
     await device.queue.onSubmittedWorkDone()
 
@@ -317,7 +388,7 @@ export class RadialShader {
     this.module = module
   }
 
-  static async createShader (device) {
+  static async createShaders (device) {
     const shaderCode = await (await fetch('radial.wgsl')).text()
     const defs = makeShaderDataDefinitions(shaderCode)
     console.log('DEF', defs)

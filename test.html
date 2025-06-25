@@ -194,9 +194,9 @@
   }
 
   async function showInCanvas (canvasElement, imageData) {
+    canvasElement.style.backgroundColor = '#000'
     canvasElement.width = imageData.width
     canvasElement.height = imageData.height
-    canvasElement.style.backgroundColor = '#000'
     // avoid using "bitmaprenderer", because transferFromImageBitmap() detach the bitmap when drawing.
     // detached bitmaps can't be drawn again.
     const ctx = canvasElement.getContext('2d')
