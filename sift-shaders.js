@@ -2,15 +2,11 @@
 // This module contains shared shader code used by both the worker and test files
 
 // SIFT implementation constants
-import { makeShaderDataDefinitions, makeStructuredView } from './lib/webgpu-utils.module.js'
-
-export const NUM_OCTAVES = 4
-export const SCALES_PER_OCTAVE = 5
-export const SIGMA_INITIAL = 1.6
-export const SIGMA_MULTIPLIER = Math.sqrt(2)
-export const CONTRAST_THRESHOLD = 0.001 // Reduced threshold to detect more features
-export const EDGE_THRESHOLD = 5.0
-export const MAX_KEYPOINTS = 10000
+import {
+  getSizeAndAlignmentOfUnsizedArrayElement, getSizeForMipFromTexture,
+  makeShaderDataDefinitions,
+  makeStructuredView, numMipLevels
+} from './lib/webgpu-utils.module.js'
 
 export const HORIZONTAL = 1
 export const VERTICAL = 2
@@ -39,6 +35,7 @@ class AllocatedRadialShader {
     resources.pipelines = shader.pipelines
     resources.kernelBuffers = kernels.map(k => {
       const kernelBuffer = shader.device.createBuffer({
+        label: 'kernel',
         size: k.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       })
       shader.device.queue.writeBuffer(kernelBuffer, 0, k)
@@ -47,7 +44,7 @@ class AllocatedRadialShader {
     resources.outputWidth = outputWidth
     resources.outputHeight = outputHeight
     resources.uniformsView = shader.uniformsView
-    const mipLevels = Math.floor(Math.log2(Math.min(outputWidth, outputHeight)))
+    const mipLevels = numMipLevels([outputWidth, outputHeight])
     console.log('mipLevels', mipLevels)
     resources.rgbaTexture = shader.device.createTexture({
       label: 'input',
@@ -109,6 +106,7 @@ class AllocatedRadialShader {
     console.log(resources.outViewsStorage)
     const bytesPerRow = Math.ceil((outputWidth * 4) / 256) * 256
     resources.outputBuffer = shader.device.createBuffer({
+      label: 'outputBuffer',
       size: bytesPerRow * outputHeight, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
     })
     const workgroupSize = shader.pipelineDescs['single_pass_radial'].compute.constants.workgroup_size
@@ -126,6 +124,7 @@ class AllocatedRadialShader {
 
   createUniformBuffer (values) {
     const buff = this.device.createBuffer({
+      label: 'uniforms',
       size: this.uniformsView.arrayBuffer.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
 
@@ -165,8 +164,7 @@ class AllocatedRadialShader {
   }
 
   mipSize (mipLevel) {
-    const mipsRatio = 2 ** mipLevel
-    return [this.outputWidth, this.outputHeight].map(d => Math.floor(d / mipsRatio))
+    return getSizeForMipFromTexture(this.outputTexture, mipLevel).slice(0, 2)
   }
 
   workgroups88Mip (mipLevel) {
@@ -239,15 +237,47 @@ class AllocatedRadialShader {
     }
     let extremaPipeline = this.pipelines['extrema']
     computePass.setPipeline(extremaPipeline)
+    const maxExtremaPerWg = 4
+    const extremaBuffers = []
+    this.extremaBuffers = extremaBuffers
     for (let mip = 0; mip < this.outputTexture.mipLevelCount; mip++) {
+      const [wgW, wgH] = this.workgroups88Mip(mip)
+      const numElements = wgW * wgH * this.maxTexture.depthOrArrayLayers
+      let extremaBuffer = this.device.createBuffer({
+        label: 'extremas ' + mip,
+        size: getSizeAndAlignmentOfUnsizedArrayElement(this.shader.defs.storages.extrema_storage).size * maxExtremaPerWg * numElements,
+        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
+      })
+      let extremaCountBuffer = this.device.createBuffer({
+        label: 'extrema count ' + mip,
+        size: getSizeAndAlignmentOfUnsizedArrayElement(this.shader.defs.storages.extrema_count_storage).size * numElements,
+        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
+      })
+      extremaBuffers.push({
+        extrema: extremaBuffer,
+        count: extremaCountBuffer,
+        workgroups: [wgW, wgH, this.maxTexture.depthOrArrayLayers]
+      })
       computePass.setBindGroup(0, this.device.createBindGroup({
         layout: extremaPipeline.getBindGroupLayout(0),
         entries: [
+          {
+            binding: 2,
+            resource: {
+              buffer: this.createUniformBuffer({
+                extrema_threshold: Math.floor(0.5 * 0.04 / 3),
+                extrema_border: 5,
+                max_extrema_per_wg: maxExtremaPerWg
+              })
+            }
+          },
           {binding: 5, resource: this.diffTextureView[mip]},
-          {binding: 7, resource: this.maxTextureView[mip]}
+          {binding: 7, resource: this.maxTextureView[mip]},
+          {binding: 11, resource: {buffer: extremaBuffer}},
+          {binding: 12, resource: {buffer: extremaCountBuffer}}
         ]
       }))
-      const [wgW, wgH] = this.workgroups88Mip(mip)
+      console.log('extrema dispatches', wgW, wgH, this.maxTexture.depthOrArrayLayers)
       computePass.dispatchWorkgroups(wgW, wgH, this.maxTexture.depthOrArrayLayers)
     }
     computePass.end()
@@ -267,7 +297,6 @@ class AllocatedRadialShader {
     computePass.setPipeline(this.pipelines['single_pass_radial'])
     let vInput
     let vOutput = this.outViewsStorage[0][0]
-    let outCopyOrig
     if (callHorizontal) {
       computePass.setBindGroup(0, this.device.createBindGroup({
         label: 'Gauss bind group 0',
@@ -301,7 +330,6 @@ class AllocatedRadialShader {
           }
         }, {binding: 3, resource: {buffer: this.kernelBuffers[0]}},]
       }))
-
       computePass.dispatchWorkgroups(...verticalWorkGroups)
     }
     await this.encodeConvertFromGray(computePass, this.tempView)
@@ -312,13 +340,29 @@ class AllocatedRadialShader {
     return commandEncoder.finish()
   }
 
+  async getBuffer (buffer) {
+    const resultBuffer = this.device.createBuffer({
+      label:'temp buffer',
+      size: buffer.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    })
+    const encoder = this.device.createCommandEncoder()
+    encoder.copyBufferToBuffer(buffer, resultBuffer)
+    this.device.queue.submit([encoder.finish()])
+    await resultBuffer.mapAsync(GPUMapMode.READ)
+    try {
+      return resultBuffer.getMappedRange().slice()
+    } finally {
+      resultBuffer.unmap()
+      resultBuffer.destroy()
+    }
+  }
+
   async getTexture (name, index, mipLevel) {
     const commandEncoder = this.device.createCommandEncoder()
-    const mipRatio = 2 ** mipLevel
-    let outW = Math.floor(this.outputWidth / mipRatio)
-    let outH = Math.floor(this.outputHeight / mipRatio)
-    const bytesPerRow = Math.ceil((outW * 4) / 256) * 256
     let texture = this[name]
+    const [outW, outH, _layers] = getSizeForMipFromTexture(texture, mipLevel)
+    const bytesPerRow = Math.ceil((outW * 4) / 256) * 256
     let sourceTexture = {texture: texture, origin: [0, 0, index], mipLevel: mipLevel}
     if (texture.format === 'r32sint') {
       const computePass = commandEncoder.beginComputePass({
@@ -339,7 +383,6 @@ class AllocatedRadialShader {
       {buffer: this.outputBuffer, bytesPerRow},
       [outW, outH, 1])
     this.device.queue.submit([commandEncoder.finish()])
-    await this.device.queue.onSubmittedWorkDone()
     await this.outputBuffer.mapAsync(GPUMapMode.READ)
     try {
       const outputData = new Uint8ClampedArray(this.outputBuffer.getMappedRange()).slice(0, bytesPerRow * outH)
@@ -357,7 +400,6 @@ class AllocatedRadialShader {
 
     console.log('Submitting command buffer to GPU queue', this.encodedCommands.label)
     device.queue.submit([this.encodedCommands])
-    await device.queue.onSubmittedWorkDone()
 
     await this.outputBuffer.mapAsync(GPUMapMode.READ)
     try {

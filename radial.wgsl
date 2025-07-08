@@ -1,4 +1,5 @@
 override workgroup_size = 64;
+override workgroupxy_size = 8;
 const use_workgroup_mem = 1;
 override workgroup_pixel_count = 16300/4;
 const MAX_2_31 = pow(2, 31) - 1.0;
@@ -8,7 +9,10 @@ struct Params {
     to_mip: u32,
     convert_to_gray: u32,
     diff_index: u32,
-    from_gray_negative: u32
+    from_gray_negative: u32,
+    extrema_threshold: f32,
+    extrema_border: i32,
+    max_extrema_per_wg: u32
 };
 
 @group(0) @binding(0) var inputTexture: texture_2d<i32>;
@@ -22,9 +26,14 @@ struct Params {
 @group(0) @binding(8) var input_rgba: texture_2d<f32>;
 @group(0) @binding(9) var output_gray: texture_storage_2d<r32sint, write>;
 @group(0) @binding(10) var output_rgba: texture_storage_2d<rgba8unorm, write>;
+//3D position (x, y, scale) of found extrema, each section of the array is a workgroup
+@group(0) @binding(11) var<storage, read_write> extrema_storage: array<vec3f>;
+// number of extrema found in each workgroup
+@group(0) @binding(12) var<storage, read_write> extrema_count_storage: array<u32>;
 
 var<workgroup> workgroupPixels: array<u32, workgroup_pixel_count>;
 var<workgroup> current_kernel_radius: u32;
+var<workgroup> current_current_wg_extrema: atomic<u32>;
 
 fn read_input(pix_pos: vec2i) -> vec4i {
     return textureLoad(inputTexture, pix_pos, parameters.from_mip);
@@ -188,21 +197,39 @@ fn combine_min_max(mm1: vec2i, mm2: vec2i) -> vec2i {
     return vec2i(new_min, new_max);
 }
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(workgroupxy_size, workgroupxy_size, 1)
 fn extrema(@builtin(global_invocation_id) global_id: vec3<u32>,
          @builtin(workgroup_id) workgroup_id: vec3<u32>,
-         @builtin(local_invocation_id) local_id: vec3<u32>) {
+         @builtin(local_invocation_id) local_id: vec3<u32>,
+         @builtin(num_workgroups) num_workgroups: vec3<u32>) {
+    let i_threshold = i32(parameters.extrema_threshold * MAX_2_31);
     let pixel_pos = vec2i(global_id.xy);
+    let texture_size = vec2i(textureDimensions(diff_output_stack));
+    let v_border = vec2i(parameters.extrema_border, parameters.extrema_border);
     let array_index = global_id.z + 1;
-    let texture_size = textureDimensions(diff_output_stack);
-    let min_max_prev = get_min_max(pixel_pos, array_index - 1);
-    let min_max_curr = get_min_max(pixel_pos, array_index);
-    let min_max_next = get_min_max(pixel_pos, array_index + 1);
-    let min_max = combine_min_max(combine_min_max(min_max_prev, min_max_curr), min_max_next);
     let current_texel = textureLoad(diff_output_stack, pixel_pos, array_index).r;
-    if any(vec2i(current_texel, current_texel) == min_max)  {
-        textureStore(max_output_stack, pixel_pos,  global_id.z, vec4i(i32(MAX_2_31)));
-    } else {
+    let wg_linearization = vec3u(1u, num_workgroups.x, num_workgroups.x * num_workgroups.y);
+    let wg_linear_index = dot(workgroup_id.xyz, wg_linearization);
+    var found_extrema = false;
+    if all(pixel_pos >= v_border) && all(pixel_pos < texture_size - v_border) {
+        let min_max_prev = get_min_max(pixel_pos, array_index - 1);
+        let min_max_curr = get_min_max(pixel_pos, array_index);
+        let min_max_next = get_min_max(pixel_pos, array_index + 1);
+        let min_max = combine_min_max(combine_min_max(min_max_prev, min_max_curr), min_max_next);
+        if abs(current_texel) > i_threshold && any(vec2i(current_texel, current_texel) == min_max)  {
+            let extremum_index = atomicAdd(&current_current_wg_extrema, 1u);
+            if extremum_index < parameters.max_extrema_per_wg {
+                extrema_storage[wg_linear_index + extremum_index] = vec3f(global_id.xyz);
+            }
+            textureStore(max_output_stack, pixel_pos,  global_id.z, vec4i(i32(MAX_2_31)));
+            found_extrema = true;
+        }
+    }
+    if !found_extrema {
         textureStore(max_output_stack, pixel_pos,  global_id.z, vec4i(current_texel));
+    }
+    workgroupBarrier();
+    if all(local_id == vec3u(0)) {
+        extrema_count_storage[wg_linear_index] = atomicLoad(&current_current_wg_extrema);
     }
 }

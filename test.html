@@ -394,6 +394,8 @@
             const device = await adapter.requestDevice({
               label: 'Test Device',
               requiredFeatures: ['timestamp-query'],
+              // turn it to 11
+              requiredLimits: {maxTextureDimension2D: adapter.limits.maxTextureDimension2D}
             })
 
             console.log('WebGPU device obtained')

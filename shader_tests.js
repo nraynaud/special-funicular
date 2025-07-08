@@ -234,14 +234,45 @@ export async function testGaussianBlurShader (device) {
       testImage = await createImageBitmap(await (await fetch('box.png')).blob())
       allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, gs)
       outputImage = await allocatedShader.runShader()
+      let totalExtrema = 0
+      const extrema = []
+      for (let mipLevel = 0; mipLevel < allocatedShader['maxTexture'].mipLevelCount; mipLevel++) {
+        extrema.push([])
+        let extremaMip0 = allocatedShader.extremaBuffers[mipLevel]
+        let extremaCounts = new Uint32Array(await allocatedShader.getBuffer(extremaMip0.count))
+        let extremaBuffer = new Float32Array(await allocatedShader.getBuffer(extremaMip0.extrema))
+        for (let x = 0; x < extremaMip0.workgroups[0]; x++) {
+          for (let y = 0; y < extremaMip0.workgroups[1]; y++) {
+            for (let s = 0; s < extremaMip0.workgroups[2]; s++) {
+              const index = s * extremaMip0.workgroups[0] * extremaMip0.workgroups[1] + y * extremaMip0.workgroups[0] + x
+              totalExtrema += extremaCounts[index]
+              if (extremaCounts[index] > 0) {
+                extrema[extrema.length - 1].push(extremaBuffer.slice(index * 4, (index + 1) * 4))
+              }
+            }
+          }
+        }
+      }
+
+      console.log('totalExtrema', totalExtrema)
+      console.log('extrema', extrema)
       const textureName = 'maxTexture'
       const texture = allocatedShader[textureName]
       for (let mipLevel = 0; mipLevel < texture.mipLevelCount; mipLevel++) {
         for (let index = 0; index < texture.depthOrArrayLayers; index++) {
-          await assert.imageTest(testImage, await allocatedShader.getTexture(textureName, index, mipLevel), `Complete blur on reference image. stack index: ${index}, mip level: ${mipLevel}`, true)
+          let overlayTexture
+          let texture = await allocatedShader.getTexture(textureName, index, mipLevel)
+          const canvas = new OffscreenCanvas(texture.width, texture.height)
+          let context = canvas.getContext('2d')
+          context.drawImage(texture, 0, 0, texture.width, texture.height)
+          context.fillStyle = 'green'
+          for (const extremum of extrema[mipLevel]) {
+            context.fillRect(extremum[0] - 1, extremum[1] - 1, 3, 3)
+          }
+          overlayTexture = context.getImageData(0, 0, texture.width, texture.height)
+          await assert.imageTest(testImage, overlayTexture, `Complete blur on reference image. stack index: ${index}, mip level: ${mipLevel}`, true)
         }
       }
-
       console.time('createImageBitmap')
       testImage = await createImageBitmap(await (await fetch('NASM-A20150317000-NASM2018-10769.jpg')).blob())
       console.log('testImage size', testImage.width, testImage.height)
