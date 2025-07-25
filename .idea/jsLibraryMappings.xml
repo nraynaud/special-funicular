@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="JavaScriptLibraryMappings">
-    <file url="PROJECT" libraries="{bootstrap, qunit-2.19.4, spectorjs, split.js, svg-pan-zoom, twgl.js}" />
+    <file url="PROJECT" libraries="{bootstrap, qunit-2.19.4, qunit-2.24.1, spectorjs, split.js, svg-pan-zoom, twgl.js}" />
     <includedPredefinedLibrary name="Node.js Core" />
   </component>
 </project>

@@ -14,5 +14,6 @@
     <orderEntry type="library" name="twgl.js" level="application" />
     <orderEntry type="library" name="spectorjs" level="application" />
     <orderEntry type="library" name="qunit-2.19.4" level="application" />
+    <orderEntry type="library" name="qunit-2.24.1" level="application" />
   </component>
 </module>

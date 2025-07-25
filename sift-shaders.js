@@ -1,7 +1,3 @@
-// SIFT WebGPU Shader Definitions
-// This module contains shared shader code used by both the worker and test files
-
-// SIFT implementation constants
 import {
   getSizeAndAlignmentOfUnsizedArrayElement,
   getSizeForMipFromTexture,
@@ -13,13 +9,33 @@ import {
 export const HORIZONTAL = 1
 export const VERTICAL = 2
 
+export function quadraticDiff (a, b) {
+  return Math.sqrt(a ** 2 - b ** 2)
+}
+
+export function computeGaussianValue (radius, kernelRadius, sigma) {
+  const twoSigmaSquared = 2.0 * sigma ** 2
+  return Math.exp(-(radius ** 2) / twoSigmaSquared) / Math.sqrt(Math.PI * twoSigmaSquared)
+}
+
+export function computeGaussianKernel (sigma, kernelRadius = null) {
+  if (kernelRadius === null) {
+    kernelRadius = Math.ceil(Math.round(sigma * 8 + 1) / 2) // adapted from openCV
+  }
+  // value at 0 will be the center pixel, value at end will be the edge pixel
+  let k = Float32Array.from({length: kernelRadius}, (_, i) => computeGaussianValue(i, kernelRadius, sigma))
+  let sum = k[0]
+  for (let i = 1; i < k.length; i++) {
+    sum += k[i] * 2
+  }
+  return Float32Array.from(k.map(v => v / sum))
+}
+
 function createMipViewArray (texture, params = {}) {
   const result = []
   for (let i = 0; i < texture.mipLevelCount; i++) {
     result.push(texture.createView({
-      mipLevelCount: 1,
-      baseMipLevel: i,
-      ...params
+      mipLevelCount: 1, baseMipLevel: i, ...params
     }))
   }
   return result
@@ -39,13 +55,13 @@ class AllocatedRadialShader {
     resources.pipelines = shader.pipelines
     resources.kernelBuffers = kernels.map(k => {
       const kernelBuffer = shader.device.createBuffer({
-        label: 'kernel',
-        size: k.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        label: 'kernel', size: k.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       })
       shader.device.queue.writeBuffer(kernelBuffer, 0, k)
       return kernelBuffer
     })
     resources.rgbaTexture = await imageToTextureMaybeDoubled(shader.device, inputImage, oneDirection === null)
+    resources.wasDoubled = resources.rgbaTexture.width !== inputImage.width
     const outputWidth = resources.rgbaTexture.width
     const outputHeight = resources.rgbaTexture.height
     resources.outputWidth = outputWidth
@@ -56,14 +72,14 @@ class AllocatedRadialShader {
     resources.rgbaTextureView = resources.rgbaTexture.createView()
     resources.outputTexture = shader.device.createTexture({
       label: 'output',
-      size: [outputWidth, outputHeight, kernels.length],
+      size: [outputWidth, outputHeight, kernels.length + 1],
       mipLevelCount: mipLevels,
       format: 'r32sint',
       usage: EVERYTHING_TEXTURE
     })
     resources.diffTexture = shader.device.createTexture({
       label: 'diff',
-      size: [outputWidth, outputHeight, Math.max(1, kernels.length - 1)],
+      size: [outputWidth, outputHeight, Math.max(1, resources.outputTexture.depthOrArrayLayers - 1)],
       mipLevelCount: mipLevels,
       format: 'r32sint',
       usage: EVERYTHING_TEXTURE
@@ -100,8 +116,7 @@ class AllocatedRadialShader {
     console.log(resources.outViewsStorage)
     const bytesPerRow = Math.ceil((outputWidth * 4) / 256) * 256
     resources.outputBuffer = shader.device.createBuffer({
-      label: 'outputBuffer',
-      size: bytesPerRow * outputHeight, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      label: 'outputBuffer', size: bytesPerRow * outputHeight, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
     })
     const workgroupSize = shader.pipelineDescs['single_pass_radial'].compute.constants.workgroup_size
     const horizontalWorkGroups = [Math.ceil(resources.outputWidth / workgroupSize), resources.outputHeight]
@@ -119,7 +134,8 @@ class AllocatedRadialShader {
   createUniformBuffer (values) {
     const buff = this.device.createBuffer({
       label: 'uniforms',
-      size: this.uniformsView.arrayBuffer.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      size: this.uniformsView.arrayBuffer.byteLength,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
 
     this.uniformsView.set(values)
@@ -128,21 +144,21 @@ class AllocatedRadialShader {
   }
 
   async encodeConvertToGray (computePass) {
-    await encodePipePrep(this.device, this.pipelines['convert_to_gray'], computePass, {
+    await encodePipePrep(this.device, computePass, this.pipelines['convert_to_gray'], this.shader.defs.entryPoints['convert_to_gray'].resources, {
       input_rgba: this.rgbaTextureView,
       parameters: this.createUniformBuffer({from_mip: 0}),
       output_gray: this.outViewsStorage[0][0]
-    }, this.shader.defs.entryPoints['convert_to_gray'].resources)
+    })
     computePass.dispatchWorkgroups(Math.ceil(this.outputWidth / 8), Math.ceil(this.outputHeight / 8))
   }
 
   async encodeConvertFromGray (computePass, inputTextureView, convertNegative = false) {
     const pipeline = this.pipelines['convert_from_gray']
-    await encodePipePrep(this.device, pipeline, computePass, {
+    await encodePipePrep(this.device, computePass, pipeline, this.shader.defs.entryPoints['convert_from_gray'].resources, {
       inputTexture: inputTextureView,
       parameters: this.createUniformBuffer({from_mip: 0, from_gray_negative: convertNegative ? 1 : 0}),
       output_rgba: this.rgbaTextureView
-    }, this.shader.defs.entryPoints['convert_from_gray'].resources)
+    })
     computePass.dispatchWorkgroups(Math.ceil(this.outputWidth / 8), Math.ceil(this.outputHeight / 8))
   }
 
@@ -155,6 +171,7 @@ class AllocatedRadialShader {
   }
 
   async encodeRepeatedPasses (workgroupSize) {
+    const use_101_border = 1
     const commandEncoder = this.device.createCommandEncoder({
       label: 'encodeRepeatedPasses'
     })
@@ -163,63 +180,81 @@ class AllocatedRadialShader {
     })
     await this.encodeConvertToGray(computePass)
     let gaussPipeline = this.pipelines['single_pass_radial']
-    computePass.setPipeline(gaussPipeline)
+    let resourceDef = this.shader.defs.entryPoints['single_pass_radial'].resources
+    if (this.wasDoubled) {
+      const [outputWidth, outputHeight] = this.mipSize(0)
+      const sigma = 1.2489995996796799 // taken from pysift
+      const kernel = computeGaussianKernel(sigma)
+      console.log('gaussian', kernel)
+      const kernelBuffer = this.device.createBuffer({
+        label: 'kernel', size: kernel.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      })
+      this.device.queue.writeBuffer(kernelBuffer, 0, kernel)
+      await encodePipePrep(this.device, computePass, gaussPipeline, resourceDef, {
+        inputTexture: this.outViewMipmap[0],
+        gaussian_textures: this.tempViewStorage[0],
+        parameters: this.createUniformBuffer({horizontal: 1, from_mip: 0, border_reflect_101: use_101_border}),
+        kernel: {buffer: kernelBuffer}
+      })
+      computePass.dispatchWorkgroups(divCeil(outputWidth, workgroupSize), outputHeight)
+      await encodePipePrep(this.device, computePass, gaussPipeline, resourceDef, {
+        inputTexture: this.tempViewStorage[0],
+        gaussian_textures: this.outViewsStorage[0][0],
+        parameters: this.createUniformBuffer({horizontal: 0, from_mip: 0, border_reflect_101: use_101_border}),
+        kernel: {buffer: kernelBuffer}
+      })
+      computePass.dispatchWorkgroups(divCeil(outputHeight, workgroupSize), outputWidth)
+    }
     for (let mipLevel = 0; mipLevel < this.outputTexture.mipLevelCount; mipLevel++) {
-      let inputMipLevel = mipLevel === 0 ? 0 : mipLevel - 1
-      let inputTexture = mipLevel === 0 ? this.outViewMipmap[0] : this.outViewMipmap[this.outViewMipmap.length - 3]
+      let inputTexture = this.outViewMipmap[0]
+      if (mipLevel > 0) {
+        // resize from higher res
+        await encodePipePrep(this.device, computePass, this.pipelines['copy'], this.shader.defs.entryPoints['copy'].resources, {
+          inputTexture: this.outViewMipmap[this.outViewMipmap.length - 3],
+          gaussian_textures: this.outViewsStorage[0][mipLevel],
+          parameters: this.createUniformBuffer({from_mip: mipLevel - 1})
+        })
+        const [outputWidth, outputHeight] = this.mipSize(mipLevel)
+        dispatchSquare(computePass, outputWidth, outputHeight, 8)
+      }
       const [outputWidth, outputHeight] = this.mipSize(mipLevel)
       const horizontalWorkGroups = [Math.ceil(outputWidth / workgroupSize), outputHeight]
       const verticalWorkGroups = [Math.ceil(outputHeight / workgroupSize), outputWidth]
       for (const [index, kernel] of this.kernelBuffers.entries()) {
         let inputParamBuffer = this.createUniformBuffer({
-          horizontal: 1,
-          from_mip: inputMipLevel,
-          convert_to_gray: mipLevel === 0 && index === 0 ? 1 : 0
+          horizontal: 1, from_mip: mipLevel, convert_to_gray: 0, border_reflect_101: use_101_border
         })
-        computePass.setBindGroup(0, this.device.createBindGroup({
-          label: 'Gauss bind group 0',
-          layout: gaussPipeline.getBindGroupLayout(0),
-          entries: [{binding: 0, resource: inputTexture},
-            {binding: 1, resource: this.tempViewStorage[mipLevel]},
-            {binding: 2, resource: inputParamBuffer},
-            {binding: 3, resource: {buffer: kernel}},]
-        }))
+        await encodePipePrep(this.device, computePass, gaussPipeline, resourceDef, {
+          inputTexture: inputTexture,
+          gaussian_textures: this.tempViewStorage[mipLevel],
+          parameters: inputParamBuffer,
+          kernel: {buffer: kernel}
+        })
         computePass.dispatchWorkgroups(...horizontalWorkGroups)
         inputParamBuffer = this.createUniformBuffer({
-          horizontal: 0,
-          from_mip: mipLevel,
-          convert_to_gray: 0
+          horizontal: 0, from_mip: mipLevel, convert_to_gray: 0, border_reflect_101: use_101_border
         })
-        computePass.setBindGroup(0, this.device.createBindGroup({
-          label: 'Gauss bind group 0',
-          layout: gaussPipeline.getBindGroupLayout(0),
-          entries: [{binding: 0, resource: this.tempView},
-            {binding: 1, resource: this.outViewsStorage[index][mipLevel]},
-            {binding: 2, resource: inputParamBuffer},
-            {binding: 3, resource: {buffer: kernel}}]
-        }))
+        await encodePipePrep(this.device, computePass, gaussPipeline, resourceDef, {
+          inputTexture: this.tempView,
+          gaussian_textures: this.outViewsStorage[index + 1][mipLevel],
+          parameters: inputParamBuffer,
+          kernel: {buffer: kernel}
+        })
         computePass.dispatchWorkgroups(...verticalWorkGroups)
-        inputTexture = this.outViewMipmap[index]
-        inputMipLevel = mipLevel
+        inputTexture = this.outViewMipmap[index + 1]
       }
     }
     let diffPipeline = this.pipelines['subtract']
-    computePass.setPipeline(diffPipeline)
     for (let mip = 0; mip < this.outputTexture.mipLevelCount; mip++) {
-      computePass.setBindGroup(0, this.device.createBindGroup({
-        label: 'diff bind group 0',
-        layout: diffPipeline.getBindGroupLayout(0),
-        entries: [
-          {binding: 2, resource: this.createUniformBuffer({from_mip: mip, convert_to_gray: 0})},
-          {binding: 4, resource: this.outViewsArray},
-          {binding: 5, resource: this.diffTextureView[mip]}
-        ]
-      }))
+      await encodePipePrep(this.device, computePass, diffPipeline, this.shader.defs.entryPoints['subtract'].resources, {
+        parameters: this.createUniformBuffer({from_mip: mip, convert_to_gray: 0}),
+        diff_input_stack: this.outViewsArray,
+        diff_output_stack: this.diffTextureView[mip]
+      })
       const [wgW, wgH] = this.workgroups88Mip(mip)
       computePass.dispatchWorkgroups(wgW, wgH, this.diffTexture.depthOrArrayLayers)
     }
     let extremaPipeline = this.pipelines['extrema']
-    computePass.setPipeline(extremaPipeline)
     const maxExtremaPerWg = 4
     const extremaBuffers = []
     this.extremaBuffers = extremaBuffers
@@ -237,29 +272,23 @@ class AllocatedRadialShader {
         usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
       })
       extremaBuffers.push({
-        extrema: extremaBuffer,
-        count: extremaCountBuffer,
-        workgroups: [wgW, wgH, this.maxTexture.depthOrArrayLayers]
+        extrema: extremaBuffer, count: extremaCountBuffer, workgroups: [wgW, wgH, this.maxTexture.depthOrArrayLayers]
       })
-      computePass.setBindGroup(0, this.device.createBindGroup({
-        layout: extremaPipeline.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 2,
-            resource: this.createUniformBuffer({
-              extrema_threshold: Math.floor(0.5 * 0.04 / 3),
-              extrema_border: 5,
-              max_extrema_per_wg: maxExtremaPerWg
-            })
-          },
-          {binding: 5, resource: this.diffTextureView[mip]},
-          {binding: 7, resource: this.maxTextureView[mip]},
-          {binding: 11, resource: {buffer: extremaBuffer}},
-          {binding: 12, resource: {buffer: extremaCountBuffer}}
-        ]
-      }))
+      await encodePipePrep(this.device, computePass, extremaPipeline, this.shader.defs.entryPoints['extrema'].resources, {
+        parameters: this.createUniformBuffer({
+          extrema_threshold: 1 / 256,
+          extrema_border: 5,
+          max_extrema_per_wg: maxExtremaPerWg,
+          from_mip: mip
+        }),
+        diff_output_stack: this.diffTextureView[mip],
+        max_output_stack: this.maxTextureView[mip],
+        extrema_storage: {buffer: extremaBuffer},
+        extrema_count_storage: {buffer: extremaCountBuffer}
+      })
       console.log('extrema dispatches', wgW, wgH, this.maxTexture.depthOrArrayLayers)
       computePass.dispatchWorkgroups(wgW, wgH, this.maxTexture.depthOrArrayLayers)
+
     }
     computePass.end()
     return commandEncoder.finish({
@@ -279,16 +308,14 @@ class AllocatedRadialShader {
     let vInput
     let vOutput = this.outViewsStorage[0][0]
     if (callHorizontal) {
-      await encodePipePrep(this.device, this.pipelines['single_pass_radial'], computePass, {
+      await encodePipePrep(this.device, computePass, this.pipelines['single_pass_radial'], resourceDef, {
         inputTexture: this.outViewsStorage[0][0],
         gaussian_textures: this.tempViewStorage[0],
         parameters: this.createUniformBuffer({
-          horizontal: 1,
-          from_mip: 0
-        })
-        ,
+          horizontal: 1, from_mip: 0
+        }),
         kernel: {buffer: this.kernelBuffers[0]}
-      }, resourceDef)
+      })
       computePass.dispatchWorkgroups(...horizontalWorkGroups)
       vInput = this.tempView
     } else {
@@ -296,13 +323,11 @@ class AllocatedRadialShader {
       vOutput = this.tempViewStorage[0]
     }
     if (callVertical) {
-      await encodePipePrep(this.device, this.pipelines['single_pass_radial'], computePass, {
+      await encodePipePrep(this.device, computePass, this.pipelines['single_pass_radial'], resourceDef, {
         inputTexture: vInput, gaussian_textures: vOutput, parameters: this.createUniformBuffer({
-          horizontal: 0,
-          from_mip: 0
-        }),
-        kernel: {buffer: this.kernelBuffers[0]}
-      }, resourceDef)
+          horizontal: 0, from_mip: 0
+        }), kernel: {buffer: this.kernelBuffers[0]}
+      })
       computePass.dispatchWorkgroups(...verticalWorkGroups)
     }
     await this.encodeConvertFromGray(computePass, this.tempView)
@@ -315,9 +340,7 @@ class AllocatedRadialShader {
 
   async getBuffer (buffer) {
     const resultBuffer = this.device.createBuffer({
-      label: 'temp buffer',
-      size: buffer.size,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      label: 'temp buffer', size: buffer.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     })
     const encoder = this.device.createCommandEncoder()
     encoder.copyBufferToBuffer(buffer, resultBuffer)
@@ -331,9 +354,12 @@ class AllocatedRadialShader {
     }
   }
 
-  async getTexture (name, index, mipLevel) {
+  async getTexture (name, mipLevel, index, centerZero = null) {
     const commandEncoder = this.device.createCommandEncoder()
     let texture = this[name]
+    if (centerZero == null) {
+      centerZero = texture === this.diffTexture
+    }
     const [outW, outH, _layers] = getSizeForMipFromTexture(texture, mipLevel)
     const bytesPerRow = Math.ceil((outW * 4) / 256) * 256
     let sourceTexture = {texture: texture, origin: [0, 0, index], mipLevel: mipLevel}
@@ -342,24 +368,28 @@ class AllocatedRadialShader {
         label: 'gray to RGBA compute pass',
       })
       await this.encodeConvertFromGray(computePass, texture.createView({
-        dimension: '2d',
-        baseMipLevel: mipLevel,
-        baseArrayLayer: index,
-        mipLevelCount: 1,
-        arrayLayerCount: 1
-      }), texture === this.diffTexture)
+        dimension: '2d', baseMipLevel: mipLevel, baseArrayLayer: index, mipLevelCount: 1, arrayLayerCount: 1
+      }), centerZero)
       computePass.end()
       sourceTexture = {texture: this.rgbaTexture, origin: [0, 0, 0], mipLevel: 0}
     }
-    commandEncoder.copyTextureToBuffer(sourceTexture,
-      {buffer: this.outputBuffer, bytesPerRow},
-      [outW, outH, 1])
+    commandEncoder.copyTextureToBuffer(sourceTexture, {buffer: this.outputBuffer, bytesPerRow}, [outW, outH, 1])
     this.device.queue.submit([commandEncoder.finish()])
     await this.outputBuffer.mapAsync(GPUMapMode.READ)
     try {
       const outputData = new Uint8ClampedArray(this.outputBuffer.getMappedRange()).slice(0, bytesPerRow * outH)
-      // createImageBitmap() cuts the extra pixels caused by the x256 bytes per row alignment
-      return await createImageBitmap(new ImageData(outputData, bytesPerRow / 4, outH), 0, 0, outW, outH)
+      // need to crop the 256-bytes line alignment constraint
+      const croppedData = new ImageData(outW, outH)
+      let videoFrame = new VideoFrame(outputData, {
+        format: 'RGBA',
+        codedWidth: bytesPerRow / 4,
+        codedHeight: outH,
+        timestamp: 0,
+        visibleRect: {x: 0, y: 0, height: outH, width: outW}
+      })
+      await videoFrame.copyTo(croppedData.data)
+      videoFrame.close()
+      return croppedData
     } finally {
       this.outputBuffer.unmap()
     }
@@ -388,8 +418,7 @@ class AllocatedRadialShader {
 }
 
 function objMap (obj, fun) {
-  return Object.fromEntries(Object.entries(obj).map(([key, v], _) =>
-    [key, fun(key, v)]))
+  return Object.fromEntries(Object.entries(obj).map(([key, v], _) => [key, fun(key, v)]))
 }
 
 export class RadialShader {
@@ -420,15 +449,18 @@ export async function loadWgsl (device, url, constants = {}) {
   const module = device.createShaderModule({
     label: `${url} module`, code: shaderCode,
   })
-  const pipelineDescs = objMap(defs.entryPoints, (key, v) =>
-    ({label: `${key} pipeline`, layout: 'auto', compute: {module: module, entryPoint: key, constants: constants}}))
+  const pipelineDescs = objMap(defs.entryPoints, (key, _v) => ({
+    label: `${key} pipeline`,
+    layout: 'auto',
+    compute: {module: module, entryPoint: key, constants: constants}
+  }))
   const pipelines = objMap(pipelineDescs, (key, v) => {
     return device.createComputePipeline(v)
   })
   return {pipelines, defs, descriptors: pipelineDescs}
 }
 
-async function encodePipePrep (device, pipeline, computePass, parameters, resourceDef) {
+async function encodePipePrep (device, computePass, pipeline, resourceDef, parameters) {
   computePass.setPipeline(pipeline)
   const bindGroups = new Map()
   for (const elem of resourceDef) {
@@ -439,9 +471,7 @@ async function encodePipePrep (device, pipeline, computePass, parameters, resour
   }
   for (const [gNum, desc] of bindGroups.entries()) {
     computePass.setBindGroup(gNum, device.createBindGroup({
-      label: `group ${0} of ${pipeline.label}`,
-      layout: pipeline.getBindGroupLayout(gNum),
-      entries: desc
+      label: `group ${0} of ${pipeline.label}`, layout: pipeline.getBindGroupLayout(gNum), entries: desc
     }))
   }
 }
@@ -451,9 +481,7 @@ export async function imageToTextureMaybeDoubled (device, inputImage, tryDouble 
   console.log('Max size', maxSize)
   const factor = tryDouble && Math.max(inputImage.width, inputImage.height) * 2 <= maxSize ? 2 : 1
   const inputTexture = device.createTexture({
-    size: [inputImage.width, inputImage.height],
-    format: 'rgba8unorm',
-    usage: EVERYTHING_TEXTURE
+    size: [inputImage.width, inputImage.height], format: 'rgba8unorm', usage: EVERYTHING_TEXTURE
   })
   // should handle both ImageBitmap and ImageData
   device.queue.copyExternalImageToTexture({source: inputImage}, {
@@ -472,19 +500,28 @@ export async function imageToTextureMaybeDoubled (device, inputImage, tryDouble 
     usage: EVERYTHING_TEXTURE
   })
   try {
-    const {pipelines, defs, descriptors} = await loadWgsl(device, 'resize.wgsl')
+    const wgSizeXY = 8
+    const {pipelines, defs} = await loadWgsl(device, 'resize.wgsl', {workgroupxy_size: wgSizeXY})
     const commandEncoder = device.createCommandEncoder()
     const computePass = commandEncoder.beginComputePass({label: 'image doubling compute pass'})
-    await encodePipePrep(device, pipelines['resize'], computePass, {
+    await encodePipePrep(device, computePass, pipelines['resize'], defs.entryPoints['resize'].resources, {
       input_sampler: device.createSampler({magFilter: 'linear', minFilter: 'linear'}),
       input_texture: inputTexture.createView(),
       output_texture: outputTexture.createView()
-    }, defs.entryPoints['resize'].resources)
-    computePass.dispatchWorkgroups(Math.ceil(outputWidth / 8), Math.ceil(outputHeight / 8))
+    })
+    dispatchSquare(computePass, outputWidth, outputHeight, wgSizeXY)
     computePass.end()
     device.queue.submit([commandEncoder.finish()])
     return outputTexture
   } finally {
     inputTexture.destroy()
   }
+}
+
+function dispatchSquare (computePass, w, h, side, z = 1) {
+  computePass.dispatchWorkgroups(divCeil(w, side), divCeil(h, side), z)
+}
+
+function divCeil (num, denominator) {
+  return Math.ceil(num / denominator)
 }

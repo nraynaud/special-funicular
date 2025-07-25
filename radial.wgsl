@@ -1,6 +1,7 @@
 override workgroup_size = 64;
 override workgroupxy_size = 8;
 const use_workgroup_mem = 1;
+//maxComputeWorkgroupStorageSize is 16384, reserving a bit of leeway
 override workgroup_pixel_count = 16300/4;
 const MAX_2_31 = pow(2, 31) - 1.0;
 struct Params {
@@ -12,7 +13,9 @@ struct Params {
     from_gray_negative: u32,
     extrema_threshold: f32,
     extrema_border: i32,
-    max_extrema_per_wg: u32
+    max_extrema_per_wg: u32,
+    // used to mimic OpenCV
+    border_reflect_101: u32
 };
 
 @group(0) @binding(0) var inputTexture: texture_2d<i32>;
@@ -27,7 +30,7 @@ struct Params {
 @group(0) @binding(9) var output_gray: texture_storage_2d<r32sint, write>;
 @group(0) @binding(10) var output_rgba: texture_storage_2d<rgba8unorm, write>;
 //3D position (x, y, scale) of found extrema, each section of the array is a workgroup
-@group(0) @binding(11) var<storage, read_write> extrema_storage: array<vec3f>;
+@group(0) @binding(11) var<storage, read_write> extrema_storage: array<vec4f>;
 // number of extrema found in each workgroup
 @group(0) @binding(12) var<storage, read_write> extrema_count_storage: array<u32>;
 
@@ -37,6 +40,16 @@ var<workgroup> current_current_wg_extrema: atomic<u32>;
 
 fn read_input(pix_pos: vec2i) -> vec4i {
     return textureLoad(inputTexture, pix_pos, parameters.from_mip);
+}
+
+fn handle_border(pix_pos: vec2i, img_size: vec2i) -> vec2i {
+    if parameters.border_reflect_101 != 0 {
+        // https://github.com/opencv/opencv/blob/4.x/modules/imgproc/src/opencl/filterSep_singlePass.cl#L67
+        var new_pos = max(pix_pos, -pix_pos);
+        new_pos = min(new_pos, (img_size - 1) * 2 - pix_pos);
+        return new_pos;
+    }
+    return pix_pos;
 }
 
 fn fill_workgroup_mem(direction: vec2i, workgroup_pos: vec2i, local_pos: vec2i, pixel_pos: vec2i, kernel_radius: i32, io_ratio: vec2i) {
@@ -88,11 +101,11 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
         local_pos = local_pos.yx;
         direction = direction.yx;
     }
-    let outputSize = vec2i(textureDimensions(gaussian_textures));
+    let output_size = vec2i(textureDimensions(gaussian_textures));
     let inputSize = vec2i(textureDimensions(inputTexture, parameters.from_mip));
     // sift only jumps by a ratio of 2, and samples the bigger input texture at every other textel
     // we will compute everything in the output sampling space, and just scale the input coords by io_ratio
-    let io_ratio = inputSize / outputSize;
+    let io_ratio = inputSize / output_size;
     let otherDirection = direction.yx;
 
   // *** 1) put some input pixels in workgroup memory
@@ -101,24 +114,25 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
     }
 
   // *** 2) compute the 1D kernel
-    if any(pixel_pos >= outputSize) {
+    if any(pixel_pos >= output_size) {
         return;
     }
 
     let localPosInDirection = dot(local_pos, direction);
     let myWorkgroupPixelOffset = localPosInDirection + kernel_radius - 1;
     var sum = 0.0;
+    // used for the border pixels whose mask is not the full kernel
     var weightSum = 0.0;
     for (var i = -kernel_radius + 1; i < kernel_radius; i++) {
-        let pixReadPos = pixel_pos + direction * i;
+        let pix_read_pos = handle_border(pixel_pos + direction * i, output_size);
         // using outputsize because the workgroup mem is at outputSize sampling rate
-        if all(pixReadPos >= vec2i(0, 0)) && all(pixReadPos < outputSize) {
+        if all(pix_read_pos >= vec2i(0, 0)) && all(pix_read_pos < output_size) {
             let weight = kernel[abs(i)];
             var texel: u32;
             if use_workgroup_mem != 0 {
-                texel = read_workgroup_mem(pixReadPos, workgroup_pos, direction, kernel_radius);
+                texel = read_workgroup_mem(pix_read_pos, workgroup_pos, direction, kernel_radius);
             } else {
-                texel = u32(read_input(pixReadPos * io_ratio).r);
+                texel = u32(read_input(pix_read_pos * io_ratio).r);
             }
             sum += f32(texel) * weight;
             weightSum += weight;
@@ -133,7 +147,19 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
     }
 }
 
-@compute @workgroup_size(8, 8, 1)
+// copy or resize
+@compute @workgroup_size(workgroupxy_size, workgroupxy_size, 1)
+fn copy(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    var pixel_pos = vec2i(global_id.xy);
+    let output_size = vec2i(textureDimensions(gaussian_textures));
+    let input_size = vec2i(textureDimensions(inputTexture, parameters.from_mip));
+    if all(pixel_pos >= vec2i(0, 0)) && all(pixel_pos < output_size) {
+        let texel = read_input(pixel_pos * input_size / output_size);
+        textureStore(gaussian_textures, pixel_pos, texel);
+    }
+}
+
+@compute @workgroup_size(workgroupxy_size, workgroupxy_size, 1)
 fn subtract(@builtin(global_invocation_id) global_id: vec3<u32>,
         @builtin(workgroup_id) workgroup_id: vec3<u32>,
         @builtin(local_invocation_id) local_id: vec3<u32>) {
@@ -146,7 +172,7 @@ fn subtract(@builtin(global_invocation_id) global_id: vec3<u32>,
     }
 }
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(workgroupxy_size, workgroupxy_size, 1)
 fn convert_to_gray(@builtin(global_invocation_id) global_id: vec3<u32>,
         @builtin(workgroup_id) workgroup_id: vec3<u32>,
         @builtin(local_invocation_id) local_id: vec3<u32>) {
@@ -158,7 +184,7 @@ fn convert_to_gray(@builtin(global_invocation_id) global_id: vec3<u32>,
     }
 }
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(workgroupxy_size, workgroupxy_size, 1)
 fn convert_from_gray(@builtin(global_invocation_id) global_id: vec3<u32>,
         @builtin(workgroup_id) workgroup_id: vec3<u32>,
         @builtin(local_invocation_id) local_id: vec3<u32>) {
@@ -205,7 +231,7 @@ fn extrema(@builtin(global_invocation_id) global_id: vec3<u32>,
     let i_threshold = i32(parameters.extrema_threshold * MAX_2_31);
     let pixel_pos = vec2i(global_id.xy);
     let texture_size = vec2i(textureDimensions(diff_output_stack));
-    let v_border = vec2i(parameters.extrema_border, parameters.extrema_border);
+    let v_border = vec2i(parameters.extrema_border);
     let array_index = global_id.z + 1;
     let current_texel = textureLoad(diff_output_stack, pixel_pos, array_index).r;
     let wg_linearization = vec3u(1u, num_workgroups.x, num_workgroups.x * num_workgroups.y);
@@ -219,7 +245,7 @@ fn extrema(@builtin(global_invocation_id) global_id: vec3<u32>,
         if abs(current_texel) > i_threshold && any(vec2i(current_texel, current_texel) == min_max)  {
             let extremum_index = atomicAdd(&current_current_wg_extrema, 1u);
             if extremum_index < parameters.max_extrema_per_wg {
-                extrema_storage[wg_linear_index + extremum_index] = vec3f(global_id.xyz);
+                extrema_storage[wg_linear_index + extremum_index] = vec4f(vec3f(global_id.xyz), f32(parameters.from_mip));
             }
             textureStore(max_output_stack, pixel_pos,  global_id.z, vec4i(i32(MAX_2_31)));
             found_extrema = true;

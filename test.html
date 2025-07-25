@@ -135,7 +135,7 @@
     <span class="close-modal">&times;</span>
     <canvas class="modal-content" id="enlargedImage"></canvas>
 </div>
-<script src="https://code.jquery.com/qunit/qunit-2.19.4.js"></script>
+<script src="https://code.jquery.com/qunit/qunit-2.24.1.js"></script>
 <script type="module">
   // Import all modules at the top level
 
@@ -161,30 +161,32 @@
 
   // Add custom assertion for displaying images in test results
   QUnit.assert.imageTest = async function (inputImage, outputImage, message, result = true) {
-    // Get the current test's assertion list element
+    const images = []
+    const captions = []
+    if (inputImage) {
+      images.push(inputImage)
+      captions.push('Input Image')
+    }
+    if (outputImage) {
+      images.push(outputImage)
+      captions.push('Output Image')
+    }
+    await this.imagesTest(images, captions, message, result)
+  }
+
+  QUnit.assert.imagesTest = async function (images, captions, message, result = true) {
     const assertionList = document.getElementById('qunit-test-output-' + QUnit.config.current.testId)
       .querySelector('.qunit-assert-list')
-
-    // Create a container for the images
     const imageContainer = document.createElement('div')
     imageContainer.className = 'test-images'
     imageContainer.style.display = 'flex'
     imageContainer.style.marginTop = '10px'
+    imageContainer.style.gap= '10px'
 
-    // Add the input image
-    if (inputImage) {
-      await addImageToTest(imageContainer, inputImage, 'Input Image')
+    for (let i = 0; i < images.length; i++) {
+      await addImageToTest(imageContainer, images[i], captions[i])
     }
-
-    // Add the output image
-    if (outputImage) {
-      await addImageToTest(imageContainer, outputImage, 'Output Image')
-    }
-
-    // Add the list item to the assertion list
     assertionList.appendChild(imageContainer)
-
-    // Push the result to QUnit
     this.pushResult({
       result: result,
       actual: result,
@@ -362,56 +364,6 @@
     async function runTests () {
       console.log('Running tests automatically...')
 
-      // Set up QUnit module for WebGPU tests
-      QUnit.module('WebGPU Tests', {
-        before: async function () {
-          // Check if WebGPU is supported
-          if (!navigator.gpu) {
-            console.error('WebGPU is not supported in this browser')
-            QUnit.test('WebGPU Support', function (assert) {
-              assert.ok(false, 'WebGPU is not supported in this browser')
-            })
-            return false
-          }
-
-          try {
-            // Request adapter
-            const adapter = await navigator.gpu.requestAdapter({
-              powerPreference: 'high-performance'
-            })
-
-            if (!adapter) {
-              console.error('No appropriate GPU adapter found')
-              QUnit.test('WebGPU Adapter', function (assert) {
-                assert.ok(false, 'No appropriate GPU adapter found')
-              })
-              return false
-            }
-
-            console.log('WebGPU adapter obtained:', adapter.name)
-
-            // Request device
-            const device = await adapter.requestDevice({
-              label: 'Test Device',
-              requiredFeatures: ['timestamp-query'],
-              // turn it to 11
-              requiredLimits: {maxTextureDimension2D: adapter.limits.maxTextureDimension2D}
-            })
-
-            console.log('WebGPU device obtained')
-
-            // Store device for tests to use
-            this.device = device
-            return true
-          } catch (error) {
-            console.error('Error initializing WebGPU:', error)
-            QUnit.test('WebGPU Initialization', function (assert) {
-              assert.ok(false, `Error initializing WebGPU: ${error.message}`)
-            })
-            return false
-          }
-        }
-      })
       await runShaderTests()
 
       // Check if there's a specific test to run from the URL hash
