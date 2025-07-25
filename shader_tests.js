@@ -245,8 +245,8 @@ export async function testGaussianBlurShader (device) {
         }
         let threshold = 200 / (mipLevel + 1) ** 2
         await assert.imagesTest([refImage, computedImage, imageData], ['pysift reference', 'computed', `magnified diff`],
-          `pysift comparison ${fileName},  real diff range is ${max_diff - min_diff + 1}/255, sqDiff: ${sqDiff.toFixed(1)} < ${threshold}`,
-          sqDiff < threshold.toFixed(1))
+          `pysift comparison ${fileName},  real diff range is ${max_diff - min_diff + 1}/255, sqDiff: ${sqDiff.toFixed(1)} < ${threshold.toFixed(1)}`,
+          sqDiff < threshold)
       }
 
       for (let mip = 0; mip < 8; mip++) {
