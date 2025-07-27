@@ -133,7 +133,7 @@ class AllocatedRadialShader {
       const callVertical = oneDirection == null || oneDirection === VERTICAL
       resources.encodedCommands = await resources.encodeSinglePass(callHorizontal, callVertical, horizontalWorkGroups, verticalWorkGroups)
     } else {
-      resources.encodedCommands = await resources.encodeRepeatedPasses(workgroupSize)
+      resources.encodedCommands = await resources.encodeRepeatedPasses(workgroupSize, extremaBorder)
     }
     return resources
   }
