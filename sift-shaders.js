@@ -3,7 +3,6 @@ import {
   getSizeForMipFromTexture,
   makeShaderDataDefinitions,
   makeStructuredView,
-  numMipLevels
 } from './lib/webgpu-utils.module.js'
 
 export const HORIZONTAL = 1
@@ -67,8 +66,11 @@ class AllocatedRadialShader {
     resources.outputWidth = outputWidth
     resources.outputHeight = outputHeight
     resources.uniformsView = shader.uniformsView
-    const mipLevels = numMipLevels([outputWidth, outputHeight])
+    // rRemove 3 levels because we use a 5pix border when looking for extrema.
+    // 2**3 = 8 we need at least a 10pix wide image.
+    const mipLevels = Math.ceil(Math.log2(Math.min(outputWidth, outputHeight))) - 3
     console.log('mipLevels', mipLevels)
+
     resources.rgbaTextureView = resources.rgbaTexture.createView()
     resources.outputTexture = shader.device.createTexture({
       label: 'output',
@@ -77,6 +79,9 @@ class AllocatedRadialShader {
       format: 'r32sint',
       usage: EVERYTHING_TEXTURE
     })
+    for (let i = 0; i < mipLevels; i++) {
+      console.log('mipLevel', i, resources.mipSize(i))
+    }
     resources.diffTexture = shader.device.createTexture({
       label: 'diff',
       size: [outputWidth, outputHeight, Math.max(1, resources.outputTexture.depthOrArrayLayers - 1)],
@@ -149,7 +154,7 @@ class AllocatedRadialShader {
       parameters: this.createUniformBuffer({from_mip: 0}),
       output_gray: this.outViewsStorage[0][0]
     })
-    computePass.dispatchWorkgroups(Math.ceil(this.outputWidth / 8), Math.ceil(this.outputHeight / 8))
+    dispatchSquare(computePass, this.outputWidth, this.outputHeight, 8)
   }
 
   async encodeConvertFromGray (computePass, inputTextureView, convertNegative = false) {
@@ -159,7 +164,7 @@ class AllocatedRadialShader {
       parameters: this.createUniformBuffer({from_mip: 0, from_gray_negative: convertNegative ? 1 : 0}),
       output_rgba: this.rgbaTextureView
     })
-    computePass.dispatchWorkgroups(Math.ceil(this.outputWidth / 8), Math.ceil(this.outputHeight / 8))
+    dispatchSquare(computePass, this.outputWidth, this.outputHeight, 8)
   }
 
   mipSize (mipLevel) {
