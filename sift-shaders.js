@@ -49,6 +49,7 @@ class AllocatedRadialShader {
 
   static async createGPUResources (shader, inputImage, kernels, oneDirection = null) {
     console.assert(oneDirection == null || kernels.length === 1, `can use oneDirection parameter only when there is only one kernel, found ${kernels.length} kernels`)
+    const extremaBorder = 5
     const resources = new AllocatedRadialShader(shader)
     resources.device = shader.device
     resources.pipelines = shader.pipelines
@@ -66,9 +67,10 @@ class AllocatedRadialShader {
     resources.outputWidth = outputWidth
     resources.outputHeight = outputHeight
     resources.uniformsView = shader.uniformsView
-    // rRemove 3 levels because we use a 5pix border when looking for extrema.
-    // 2**3 = 8 we need at least a 10pix wide image.
-    const mipLevels = Math.ceil(Math.log2(Math.min(outputWidth, outputHeight))) - 3
+    // 2**3 = 8 we need at least a 10pix wide image to find an extremum
+    const borderMip = Math.floor(Math.log2(extremaBorder * 2))
+    // Remove a few levels because we use a border when looking for extrema.
+    const mipLevels = Math.ceil(Math.log2(Math.min(outputWidth, outputHeight))) - borderMip
     console.log('mipLevels', mipLevels)
 
     resources.rgbaTextureView = resources.rgbaTexture.createView()
@@ -175,7 +177,7 @@ class AllocatedRadialShader {
     return this.mipSize(mipLevel).map(d => Math.ceil(d / 8))
   }
 
-  async encodeRepeatedPasses (workgroupSize) {
+  async encodeRepeatedPasses (workgroupSize, extremaBorder) {
     const use_101_border = 1
     const commandEncoder = this.device.createCommandEncoder({
       label: 'encodeRepeatedPasses'
@@ -282,7 +284,7 @@ class AllocatedRadialShader {
       await encodePipePrep(this.device, computePass, extremaPipeline, this.shader.defs.entryPoints['extrema'].resources, {
         parameters: this.createUniformBuffer({
           extrema_threshold: 1 / 256,
-          extrema_border: 5,
+          extrema_border: extremaBorder,
           max_extrema_per_wg: maxExtremaPerWg,
           from_mip: mip
         }),
