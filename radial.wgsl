@@ -4,6 +4,20 @@ const use_workgroup_mem = 1;
 //maxComputeWorkgroupStorageSize is 16384, reserving a bit of leeway
 override workgroup_pixel_count = 16300/4;
 const MAX_2_31 = pow(2, 31) - 1.0;
+const NEIGHBOR_COUNT = 26;
+const neighbors:array<vec3i, NEIGHBOR_COUNT>  = array(
+    vec3i(-1, -1, -1), vec3i(0, -1, -1), vec3i(1, -1, -1),
+    vec3i(-1, 0, -1), vec3i(0, 0, -1), vec3i(1, 0, -1),
+    vec3i(-1, 1, -1), vec3i(0, 1, -1), vec3i(1, 1, -1),
+
+    vec3i(-1, -1, 0), vec3i(0, -1, 0), vec3i(1, -1, 0),
+    vec3i(-1, 0, 0), vec3i(1, 0, 0),
+    vec3i(-1, 1, 0), vec3i(0, 1, 0), vec3i(1, 1, 0),
+
+    vec3i(-1, -1, 1), vec3i(0, -1, 1), vec3i(1, -1, 1),
+    vec3i(-1, 0, 1), vec3i(0, 0, 1), vec3i(1, 0, 1),
+    vec3i(-1, 1, 1), vec3i(0, 1, 1), vec3i(1, 1, 1)
+);
 struct Params {
     horizontal: u32,
     from_mip: u32,
@@ -25,18 +39,14 @@ struct Params {
 @group(0) @binding(4) var diff_input_stack: texture_2d_array<i32>;
 @group(0) @binding(5) var diff_output_stack: texture_storage_2d_array<r32sint, read_write>;
 @group(0) @binding(6) var max_input_stack: texture_2d_array<f32>;
-@group(0) @binding(7) var max_output_stack: texture_storage_2d_array<r32sint, write>;
-@group(0) @binding(8) var input_rgba: texture_2d<f32>;
-@group(0) @binding(9) var output_gray: texture_storage_2d<r32sint, write>;
-@group(0) @binding(10) var output_rgba: texture_storage_2d<rgba8unorm, write>;
-//3D position (x, y, scale) of found extrema, each section of the array is a workgroup
-@group(0) @binding(11) var<storage, read_write> extrema_storage: array<vec4f>;
-// number of extrema found in each workgroup
-@group(0) @binding(12) var<storage, read_write> extrema_count_storage: array<u32>;
+@group(0) @binding(7) var input_rgba: texture_2d<f32>;
+@group(0) @binding(8) var output_gray: texture_storage_2d<r32sint, write>;
+@group(0) @binding(9) var output_rgba: texture_storage_2d<rgba8unorm, write>;
+// 4D position (x, y, scale, mip) of found extrema
+@group(0) @binding(10) var<storage, read_write> extrema_storage: array<vec4f>;
+@group(0) @binding(11) var<storage, read_write> extrema_count: atomic<u32>;
 
 var<workgroup> workgroupPixels: array<u32, workgroup_pixel_count>;
-var<workgroup> current_kernel_radius: u32;
-var<workgroup> current_current_wg_extrema: atomic<u32>;
 
 fn read_input(pix_pos: vec2i) -> vec4i {
     return textureLoad(inputTexture, pix_pos, parameters.from_mip);
@@ -89,8 +99,7 @@ fn to_gray(texel: vec4f) -> vec4f {
 fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>) {
-    current_kernel_radius = arrayLength(&kernel);
-    let kernel_radius = i32(workgroupUniformLoad(&current_kernel_radius));
+    let kernel_radius = i32(arrayLength(&kernel));
     var pixel_pos = vec2i(global_id.xy);
     var workgroup_pos = vec2i(workgroup_id.xy) * workgroup_size;
     var local_pos = vec2i(local_id.xy);
@@ -199,24 +208,6 @@ fn convert_from_gray(@builtin(global_invocation_id) global_id: vec3<u32>,
     }
 }
 
-fn get_min_max(pixel_pos:vec2i, array_index:u32) -> vec2i {
-    var seen_value = false;
-    var min_value: i32;
-    var max_value: i32;
-    for (var i = -1; i <2; i++) {
-        for (var j = -1; j < 2; j++) {
-            let sampling_pos = pixel_pos + vec2i(i, j);
-            if (all(sampling_pos >= vec2i(0)) && all(pixel_pos < vec2i(textureDimensions(diff_output_stack)))) {
-                let texel = textureLoad(diff_output_stack, sampling_pos, array_index).r;
-                min_value = select(texel, min(min_value, texel), seen_value);
-                max_value = select(texel, max(max_value, texel), seen_value);
-                seen_value = true;
-            }
-        }
-    }
-    return vec2i(min_value, max_value);
-}
-
 fn combine_min_max(mm1: vec2i, mm2: vec2i) -> vec2i {
     let new_min = min(mm1.x, mm2.x);
     let new_max = max(mm1.y, mm2.y);
@@ -232,30 +223,28 @@ fn extrema(@builtin(global_invocation_id) global_id: vec3<u32>,
     let pixel_pos = vec2i(global_id.xy);
     let texture_size = vec2i(textureDimensions(diff_output_stack));
     let v_border = vec2i(parameters.extrema_border);
-    let array_index = global_id.z + 1;
+    let array_index = i32(global_id.z) + 1;
     let current_texel = textureLoad(diff_output_stack, pixel_pos, array_index).r;
     let wg_linearization = vec3u(1u, num_workgroups.x, num_workgroups.x * num_workgroups.y);
     let wg_linear_index = dot(workgroup_id.xyz, wg_linearization);
-    var found_extrema = false;
     if all(pixel_pos >= v_border) && all(pixel_pos < texture_size - v_border) {
-        let min_max_prev = get_min_max(pixel_pos, array_index - 1);
-        let min_max_curr = get_min_max(pixel_pos, array_index);
-        let min_max_next = get_min_max(pixel_pos, array_index + 1);
-        let min_max = combine_min_max(combine_min_max(min_max_prev, min_max_curr), min_max_next);
-        if abs(current_texel) > i_threshold && any(vec2i(current_texel, current_texel) == min_max)  {
-            let extremum_index = atomicAdd(&current_current_wg_extrema, 1u);
-            if extremum_index < parameters.max_extrema_per_wg {
-                extrema_storage[wg_linear_index + extremum_index] = vec4f(vec3f(global_id.xyz), f32(parameters.from_mip));
+        var current_min_max = vec2i(0);
+        for (var i = 0; i < NEIGHBOR_COUNT; i++) {
+            let neighbor = neighbors[i];
+            let texel = vec2i(textureLoad(diff_output_stack, pixel_pos + neighbor.xy, array_index + neighbor.z).r);
+            current_min_max = select(combine_min_max(current_min_max, texel), texel, i == 0);
+        }
+        if abs(current_texel) > i_threshold && (current_texel < current_min_max.x || current_texel > current_min_max.y)  {
+            let extremum_index = atomicAdd(&extrema_count, 1u);
+            if extremum_index < arrayLength(&extrema_storage) {
+                extrema_storage[extremum_index] = vec4f(vec3f(global_id.xyz), f32(parameters.from_mip));
             }
-            textureStore(max_output_stack, pixel_pos,  global_id.z, vec4i(i32(MAX_2_31)));
-            found_extrema = true;
         }
     }
-    if !found_extrema {
-        textureStore(max_output_stack, pixel_pos,  global_id.z, vec4i(current_texel));
-    }
-    workgroupBarrier();
-    if all(local_id == vec3u(0)) {
-        extrema_count_storage[wg_linear_index] = atomicLoad(&current_current_wg_extrema);
-    }
+}
+
+
+@compute @workgroup_size(workgroup_size, 1, 1)
+fn refine_extrema(@builtin(global_invocation_id) global_id: vec3<u32>) {
+
 }

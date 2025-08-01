@@ -21,7 +21,7 @@ export function computeGaussianKernel (sigma, kernelRadius = null) {
   if (kernelRadius === null) {
     kernelRadius = Math.ceil(Math.round(sigma * 8 + 1) / 2) // adapted from openCV
   }
-  // value at 0 will be the center pixel, value at end will be the edge pixel
+  // value at 0 will be the center pixel, the last value will be the edge pixel
   let k = Float32Array.from({length: kernelRadius}, (_, i) => computeGaussianValue(i, kernelRadius, sigma))
   let sum = k[0]
   for (let i = 1; i < k.length; i++) {
@@ -91,15 +91,8 @@ class AllocatedRadialShader {
       format: 'r32sint',
       usage: EVERYTHING_TEXTURE
     })
+    // do not use a 3d texture, because mipmapping would also divide the Z axis
     resources.diffTextureView = createMipViewArray(resources.diffTexture)
-    resources.maxTexture = shader.device.createTexture({
-      label: 'maxTexture',
-      size: [outputWidth, outputHeight, Math.max(1, resources.diffTexture.depthOrArrayLayers - 2)],
-      mipLevelCount: mipLevels,
-      format: 'r32sint',
-      usage: EVERYTHING_TEXTURE
-    })
-    resources.maxTextureView = createMipViewArray(resources.maxTexture)
     resources.outViewsArray = resources.outputTexture.createView({
       dimension: '2d-array'
     })
@@ -147,7 +140,7 @@ class AllocatedRadialShader {
 
     this.uniformsView.set(values)
     this.device.queue.writeBuffer(buff, 0, this.uniformsView.arrayBuffer)
-    return {buffer: buff}
+    return buff
   }
 
   async encodeConvertToGray (computePass) {
@@ -262,39 +255,30 @@ class AllocatedRadialShader {
       computePass.dispatchWorkgroups(wgW, wgH, this.diffTexture.depthOrArrayLayers)
     }
     let extremaPipeline = this.pipelines['extrema']
-    const maxExtremaPerWg = 4
-    const extremaBuffers = []
-    this.extremaBuffers = extremaBuffers
+    this.extremaBuffer = this.device.createBuffer({
+      label: 'extremas',
+      size: 2 * 1024**2,
+      usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
+    })
+    this.totalExtremaBuffer = this.device.createBuffer({
+      label: 'total extrema count ',
+      size: 4,
+      usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
+    })
     for (let mip = 0; mip < this.outputTexture.mipLevelCount; mip++) {
       const [wgW, wgH] = this.workgroups88Mip(mip)
-      const numElements = wgW * wgH * this.maxTexture.depthOrArrayLayers
-      let extremaBuffer = this.device.createBuffer({
-        label: 'extremas ' + mip,
-        size: getSizeAndAlignmentOfUnsizedArrayElement(this.shader.defs.storages.extrema_storage).size * maxExtremaPerWg * numElements,
-        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
-      })
-      let extremaCountBuffer = this.device.createBuffer({
-        label: 'extrema count ' + mip,
-        size: getSizeAndAlignmentOfUnsizedArrayElement(this.shader.defs.storages.extrema_count_storage).size * numElements,
-        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
-      })
-      extremaBuffers.push({
-        extrema: extremaBuffer, count: extremaCountBuffer, workgroups: [wgW, wgH, this.maxTexture.depthOrArrayLayers]
-      })
       await encodePipePrep(this.device, computePass, extremaPipeline, this.shader.defs.entryPoints['extrema'].resources, {
         parameters: this.createUniformBuffer({
-          extrema_threshold: 1 / 256,
+          extrema_threshold: 1 / 255,
           extrema_border: extremaBorder,
-          max_extrema_per_wg: maxExtremaPerWg,
           from_mip: mip
         }),
         diff_output_stack: this.diffTextureView[mip],
-        max_output_stack: this.maxTextureView[mip],
-        extrema_storage: {buffer: extremaBuffer},
-        extrema_count_storage: {buffer: extremaCountBuffer}
+        extrema_storage: this.extremaBuffer,
+        extrema_count: this.totalExtremaBuffer
       })
-      console.log('extrema dispatches', wgW, wgH, this.maxTexture.depthOrArrayLayers)
-      computePass.dispatchWorkgroups(wgW, wgH, this.maxTexture.depthOrArrayLayers)
+      console.log('extrema dispatches', wgW, wgH, this.diffTexture.depthOrArrayLayers - 2)
+      computePass.dispatchWorkgroups(wgW, wgH, this.diffTexture.depthOrArrayLayers - 2)
 
     }
     computePass.end()
@@ -345,12 +329,15 @@ class AllocatedRadialShader {
     return commandEncoder.finish()
   }
 
-  async getBuffer (buffer) {
+  async getBuffer (buffer, sizeLimit = null) {
+    if (sizeLimit == null) {
+      sizeLimit = buffer.size
+    }
     const resultBuffer = this.device.createBuffer({
-      label: 'temp buffer', size: buffer.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      label: 'temp buffer', size: sizeLimit, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     })
     const encoder = this.device.createCommandEncoder()
-    encoder.copyBufferToBuffer(buffer, resultBuffer)
+    encoder.copyBufferToBuffer(buffer, resultBuffer, sizeLimit)
     this.device.queue.submit([encoder.finish()])
     await resultBuffer.mapAsync(GPUMapMode.READ)
     try {

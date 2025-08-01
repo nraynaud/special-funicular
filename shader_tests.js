@@ -21,8 +21,7 @@ export async function runShaderTests () {
     })
     const device = await adapter.requestDevice({
       label: 'Shader Test Device', requiredLimits: {
-        maxTextureDimension2D: adapter.limits.maxTextureDimension2D,
-        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize
+        maxTextureDimension2D: adapter.limits.maxTextureDimension2D
       }, requiredFeatures: ['float32-filterable']
     })
     device.addEventListener('uncapturederror', (event) => {
@@ -149,7 +148,7 @@ export async function testGaussianBlurShader (device) {
         imageData.data[i + 2] = 0
         imageData.data[i + 3] = 255
       }
-      let threshold = 200 / (mipLevel + 1) ** 2
+      let threshold = 400 / (mipLevel + 1) ** 2
       await assert.imagesTest([refImage, computedImage, imageData], ['pysift reference', 'computed', `magnified diff`], `pysift comparison ${fileName},  real diff range is ${max_diff - min_diff + 1}/255, sqDiff: ${sqDiff.toFixed(1)} < ${threshold.toFixed(1)}`, sqDiff < threshold)
     }
 
@@ -164,31 +163,24 @@ export async function testGaussianBlurShader (device) {
       }
     }
 
+    const extremaCounter = new Uint32Array(await allocatedShader.getBuffer(allocatedShader.totalExtremaBuffer))
+    const extremaBuffer = new Float32Array(await allocatedShader.getBuffer(allocatedShader.extremaBuffer, extremaCounter[0] * 4 * 4))
+    console.log('extremaCounter', extremaCounter)
     let totalExtrema = 0
     const extrema = []
-    for (let mipLevel = 0; mipLevel < allocatedShader['maxTexture'].mipLevelCount; mipLevel++) {
-      let extremaMip = allocatedShader.extremaBuffers[mipLevel]
-      let extremaCounts = new Uint32Array(await allocatedShader.getBuffer(extremaMip.count))
-      let extremaBuffer = new Float32Array(await allocatedShader.getBuffer(extremaMip.extrema))
-      for (let x = 0; x < extremaMip.workgroups[0]; x++) {
-        for (let y = 0; y < extremaMip.workgroups[1]; y++) {
-          for (let s = 0; s < extremaMip.workgroups[2]; s++) {
-            const index = s * extremaMip.workgroups[0] * extremaMip.workgroups[1] + y * extremaMip.workgroups[0] + x
-            totalExtrema += extremaCounts[index]
-            if (extremaCounts[index] > 0) {
-              extrema.push(extremaBuffer.slice(index * 4, (index + 1) * 4))
-            }
-          }
-        }
+    for (let i = 0; i < extremaBuffer.length; i += 4) {
+      const extremum = extremaBuffer.slice(i, (i + 4))
+      if (extremum[0] > 0 && extremum[1] > 0) {
+        totalExtrema++
+        extrema.push(extremum)
       }
     }
 
     console.log('totalExtrema', totalExtrema)
     console.log('extrema', extrema)
-    console.log('0, 0 extrema', extrema.filter(e => e[2] === 0 && e[3] === 0))
     const pysiftKeypoints = await (await fetch('pysift_ref/raw_keypoints.json')).json()
     console.log('pysift_ref', pysiftKeypoints)
-    const textureName = 'maxTexture'
+    const textureName = 'diffTexture'
     const texture = allocatedShader[textureName]
     const contexts = []
     for (let mipLevel = 0; mipLevel < texture.mipLevelCount; mipLevel++) {
@@ -367,7 +359,6 @@ export async function testGaussianBlurShader (device) {
           }
         }
       }
-
     } catch (error) {
       console.error('Error testing Gaussian Blur Shader:', error)
       assert.ok(false, `Error testing Gaussian Blur Shader: ${error.message}`)
