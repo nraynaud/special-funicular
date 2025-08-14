@@ -1,5 +1,4 @@
 import {
-  getSizeAndAlignmentOfUnsizedArrayElement,
   getSizeForMipFromTexture,
   makeShaderDataDefinitions,
   makeStructuredView,
@@ -171,18 +170,48 @@ class AllocatedRadialShader {
   }
 
   async encodeRepeatedPasses (workgroupSize, extremaBorder) {
+    let effort = 0
+    let commandEncoder = null
+    let computePass = null
+    const result = []
+
+    function closePass () {
+      if (computePass) {
+        computePass.end()
+        computePass = null
+      }
+    }
+
+    function closeEncoder () {
+      closePass()
+      if (commandEncoder) {
+        result.push(commandEncoder.finish({
+          label: commandEncoder.label + ' pix: ' + effort
+        }))
+        commandEncoder = null
+        effort = 0
+      }
+    }
+
+    const beginSection = (name) => {
+      if (effort > 50e6)
+        closeEncoder()
+      if (commandEncoder === null) {
+        commandEncoder = this.device.createCommandEncoder({label: name})
+      }
+      if (computePass === null) {
+        computePass = commandEncoder.beginComputePass({label: name})
+      }
+    }
+    const [outputWidth, outputHeight] = this.mipSize(0)
     const use_101_border = 1
-    const commandEncoder = this.device.createCommandEncoder({
-      label: 'encodeRepeatedPasses'
-    })
-    const computePass = commandEncoder.beginComputePass({
-      label: 'Gaussian repeated compute pass',
-    })
+    beginSection('Convert to gray')
     await this.encodeConvertToGray(computePass)
+    effort += outputWidth * outputHeight
     let gaussPipeline = this.pipelines['single_pass_radial']
     let resourceDef = this.shader.defs.entryPoints['single_pass_radial'].resources
     if (this.wasDoubled) {
-      const [outputWidth, outputHeight] = this.mipSize(0)
+      beginSection('blur initial Image')
       const sigma = 1.2489995996796799 // taken from pysift
       const kernel = computeGaussianKernel(sigma)
       console.log('gaussian', kernel)
@@ -204,23 +233,27 @@ class AllocatedRadialShader {
         kernel: {buffer: kernelBuffer}
       })
       computePass.dispatchWorkgroups(divCeil(outputHeight, workgroupSize), outputWidth)
+      effort += outputWidth * outputHeight + 4 * kernel.size / 4
     }
+
     for (let mipLevel = 0; mipLevel < this.outputTexture.mipLevelCount; mipLevel++) {
       let inputTexture = this.outViewMipmap[0]
+      const [outputWidth, outputHeight] = this.mipSize(mipLevel)
       if (mipLevel > 0) {
+        beginSection(`resize image to mip ` + mipLevel)
         // resize from higher res
         await encodePipePrep(this.device, computePass, this.pipelines['copy'], this.shader.defs.entryPoints['copy'].resources, {
           inputTexture: this.outViewMipmap[this.outViewMipmap.length - 3],
           gaussian_textures: this.outViewsStorage[0][mipLevel],
           parameters: this.createUniformBuffer({from_mip: mipLevel - 1})
         })
-        const [outputWidth, outputHeight] = this.mipSize(mipLevel)
         dispatchSquare(computePass, outputWidth, outputHeight, 8)
+        effort += outputWidth * outputHeight
       }
-      const [outputWidth, outputHeight] = this.mipSize(mipLevel)
       const horizontalWorkGroups = [Math.ceil(outputWidth / workgroupSize), outputHeight]
       const verticalWorkGroups = [Math.ceil(outputHeight / workgroupSize), outputWidth]
       for (const [index, kernel] of this.kernelBuffers.entries()) {
+        beginSection(`horizontal blur image mip: ${mipLevel} index: ${index}`)
         let inputParamBuffer = this.createUniformBuffer({
           horizontal: 1, from_mip: mipLevel, convert_to_gray: 0, border_reflect_101: use_101_border
         })
@@ -231,6 +264,8 @@ class AllocatedRadialShader {
           kernel: {buffer: kernel}
         })
         computePass.dispatchWorkgroups(...horizontalWorkGroups)
+        effort += outputWidth * outputHeight + 2 * horizontalWorkGroups[0] * kernel.size / 4 * 3
+        beginSection(`vertical blur image mip: ${mipLevel} index: ${index}`)
         inputParamBuffer = this.createUniformBuffer({
           horizontal: 0, from_mip: mipLevel, convert_to_gray: 0, border_reflect_101: use_101_border
         })
@@ -241,9 +276,11 @@ class AllocatedRadialShader {
           kernel: {buffer: kernel}
         })
         computePass.dispatchWorkgroups(...verticalWorkGroups)
+        effort += outputWidth * outputHeight + 2 * verticalWorkGroups[0] * kernel.size / 4 * 3
         inputTexture = this.outViewMipmap[index + 1]
       }
     }
+    beginSection('diff all images')
     let diffPipeline = this.pipelines['subtract']
     for (let mip = 0; mip < this.outputTexture.mipLevelCount; mip++) {
       await encodePipePrep(this.device, computePass, diffPipeline, this.shader.defs.entryPoints['subtract'].resources, {
@@ -254,10 +291,12 @@ class AllocatedRadialShader {
       const [wgW, wgH] = this.workgroups88Mip(mip)
       computePass.dispatchWorkgroups(wgW, wgH, this.diffTexture.depthOrArrayLayers)
     }
+    effort += outputWidth * outputHeight * this.diffTexture.depthOrArrayLayers * 1.25
+    beginSection('get extrema')
     let extremaPipeline = this.pipelines['extrema']
     this.extremaBuffer = this.device.createBuffer({
       label: 'extremas',
-      size: 2 * 1024**2,
+      size: 2 * 1024 ** 2,
       usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
     })
     this.totalExtremaBuffer = this.device.createBuffer({
@@ -279,12 +318,10 @@ class AllocatedRadialShader {
       })
       console.log('extrema dispatches', wgW, wgH, this.diffTexture.depthOrArrayLayers - 2)
       computePass.dispatchWorkgroups(wgW, wgH, this.diffTexture.depthOrArrayLayers - 2)
-
     }
-    computePass.end()
-    return commandEncoder.finish({
-      label: 'encodeRepeatedPasses'
-    })
+    effort += outputWidth * outputHeight * (this.diffTexture.depthOrArrayLayers - 2) * 1.25
+    closeEncoder()
+    return result
   }
 
   async encodeSinglePass (callHorizontal, callVertical, horizontalWorkGroups, verticalWorkGroups) {
@@ -326,7 +363,7 @@ class AllocatedRadialShader {
     commandEncoder.copyTextureToBuffer({texture: this.rgbaTexture}, {
       buffer: this.outputBuffer, bytesPerRow
     }, [this.outputWidth, this.outputHeight, 1])
-    return commandEncoder.finish()
+    return [commandEncoder.finish()]
   }
 
   async getBuffer (buffer, sizeLimit = null) {
@@ -394,10 +431,19 @@ class AllocatedRadialShader {
     const bytesPerRow = Math.ceil((this.outputWidth * 4) / 256) * 256
     const device = this.shader.device
 
-    console.log('Submitting command buffer to GPU queue', this.encodedCommands.label)
-    device.queue.submit([this.encodedCommands])
-
+    console.log('Submitting command buffer to GPU queue', this.encodedCommands.map(b => b.label))
+    console.time('submit')
+    for (const b of this.encodedCommands) {
+      console.time('submit ' + b.label)
+      device.queue.submit([b])
+      // slow down the submission rate to avoid blocking the entire browser on slow GPUs
+      await device.queue.onSubmittedWorkDone()
+      console.timeEnd('submit ' + b.label)
+    }
+    console.timeEnd('submit')
+    console.time('mapAsync')
     await this.outputBuffer.mapAsync(GPUMapMode.READ)
+    console.timeEnd('mapAsync')
     try {
       console.time('result copy')
       const outputData = new Uint8ClampedArray(this.outputBuffer.getMappedRange()).slice()
