@@ -130,15 +130,18 @@ class AllocatedRadialShader {
     return resources
   }
 
-  createUniformBuffer (values) {
+  createUniformBuffer (values, view) {
+    if (view === undefined) {
+      view = this.uniformsView
+    }
     const buff = this.device.createBuffer({
       label: 'uniforms',
-      size: this.uniformsView.arrayBuffer.byteLength,
+      size: view.arrayBuffer.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
 
-    this.uniformsView.set(values)
-    this.device.queue.writeBuffer(buff, 0, this.uniformsView.arrayBuffer)
+    view.set(values)
+    this.device.queue.writeBuffer(buff, 0, view.arrayBuffer)
     return buff
   }
 
@@ -293,7 +296,7 @@ class AllocatedRadialShader {
     }
     effort += outputWidth * outputHeight * this.diffTexture.depthOrArrayLayers * 1.25
     beginSection('get extrema')
-    let extremaPipeline = this.pipelines['extrema']
+    let extremaPipeline = this.shader.extremaShader.pipelines['extrema']
     this.extremaBuffer = this.device.createBuffer({
       label: 'extremas',
       size: 2 * 1024 ** 2,
@@ -306,13 +309,13 @@ class AllocatedRadialShader {
     })
     for (let mip = 0; mip < this.outputTexture.mipLevelCount; mip++) {
       const [wgW, wgH] = this.workgroups88Mip(mip)
-      await encodePipePrep(this.device, computePass, extremaPipeline, this.shader.defs.entryPoints['extrema'].resources, {
+      await encodePipePrep(this.device, computePass, extremaPipeline, this.shader.extremaShader.defs.entryPoints['extrema'].resources, {
         parameters: this.createUniformBuffer({
           extrema_threshold: 1 / 255,
           extrema_border: extremaBorder,
           from_mip: mip
-        }),
-        diff_output_stack: this.diffTextureView[mip],
+        }, this.shader.extremaUniformsView),
+        diff_stack: this.diffTextureView[mip],
         extrema_storage: this.extremaBuffer,
         extrema_count: this.totalExtremaBuffer
       })
@@ -463,17 +466,20 @@ function objMap (obj, fun) {
 
 export class RadialShader {
 
-  constructor (device, pipelines, pipelineDescs, defs) {
+  constructor (device, pipelines, pipelineDescs, defs, extremaShader) {
     this.device = device
     this.pipelines = pipelines
     this.pipelineDescs = pipelineDescs
     this.defs = defs
+    this.extremaShader = extremaShader
   }
 
   static async createShaders (device) {
     const {pipelines, defs, descriptors} = await loadWgsl(device, 'radial.wgsl', {workgroup_size: 64})
-    let shader = new RadialShader(device, pipelines, descriptors, defs)
+    const extremaShader = await loadWgsl(device, 'extrema.wgsl', {workgroupxy_size: 8})
+    let shader = new RadialShader(device, pipelines, descriptors, defs, extremaShader)
     shader.uniformsView = makeStructuredView(shader.defs.uniforms.parameters)
+    shader.extremaUniformsView = makeStructuredView(extremaShader.defs.uniforms.parameters)
     return shader
   }
 
