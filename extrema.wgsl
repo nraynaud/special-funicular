@@ -1,4 +1,3 @@
-override workgroup_size = 64;
 override workgroupxy_size = 8;
 
 struct Params {

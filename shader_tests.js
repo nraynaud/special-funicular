@@ -118,126 +118,131 @@ export async function testGaussianBlurShader (device) {
 
     const testImage = await createImageBitmap(await (await fetch('box.png')).blob())
     const allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, gs)
-    outputImage = await allocatedShader.runShader()
+    try {
 
-    async function compareToPysift (fileName, textureName, mipLevel, index, centerZero = false) {
-      const refImage = await createImageBitmap(await (await fetch(fileName)).blob())
-      const computedImage = await allocatedShader.getTexture(textureName, mipLevel, index, centerZero)
-      const refVidFrame = new VideoFrame(refImage, {timestamp: 0})
-      const refData = new Uint8Array(refVidFrame.allocationSize())
-      await refVidFrame.copyTo(refData)
-      refVidFrame.close()
-      const imageData = new ImageData(refImage.width, refImage.height)
+      outputImage = await allocatedShader.runShader()
 
-      let max_diff = 0
-      let min_diff = 0
-      let sqDiff = 0
-      for (let i = 0; i < imageData.data.length; i += 4) {
-        let diff = refData[i] - computedImage.data[i]
-        sqDiff += diff ** 2
-        max_diff = Math.max(max_diff, diff)
-        min_diff = Math.min(min_diff, diff)
+      async function compareToPysift (fileName, textureName, mipLevel, index, centerZero = false) {
+        const refImage = await createImageBitmap(await (await fetch(fileName)).blob())
+        const computedImage = await allocatedShader.getTexture(textureName, mipLevel, index, centerZero)
+        const refVidFrame = new VideoFrame(refImage, {timestamp: 0})
+        const refData = new Uint8Array(refVidFrame.allocationSize())
+        await refVidFrame.copyTo(refData)
+        refVidFrame.close()
+        const imageData = new ImageData(refImage.width, refImage.height)
+
+        let max_diff = 0
+        let min_diff = 0
+        let sqDiff = 0
+        for (let i = 0; i < imageData.data.length; i += 4) {
+          let diff = refData[i] - computedImage.data[i]
+          sqDiff += diff ** 2
+          max_diff = Math.max(max_diff, diff)
+          min_diff = Math.min(min_diff, diff)
+        }
+        sqDiff = Math.sqrt(sqDiff)
+        const factor = 255 / (max_diff - min_diff)
+        for (let i = 0; i < imageData.data.length; i += 4) {
+          let diff = (refData[i] - computedImage.data[i] - min_diff) * factor
+          // noinspection PointlessArithmeticExpressionJS
+          imageData.data[i + 0] = diff >= 0 ? diff : 0
+          imageData.data[i + 1] = diff < 0 ? -diff : 0
+          imageData.data[i + 2] = 0
+          imageData.data[i + 3] = 255
+        }
+        let threshold = 400 / (mipLevel + 1) ** 2
+        await assert.imagesTest([refImage, computedImage, imageData], ['pysift reference', 'computed', `magnified diff`], `pysift comparison ${fileName},  real diff range is ${max_diff - min_diff + 1}/255, sqDiff: ${sqDiff.toFixed(1)} < ${threshold.toFixed(1)}`, sqDiff < threshold)
       }
-      sqDiff = Math.sqrt(sqDiff)
-      const factor = 255 / (max_diff - min_diff)
-      for (let i = 0; i < imageData.data.length; i += 4) {
-        let diff = (refData[i] - computedImage.data[i] - min_diff) * factor
-        // noinspection PointlessArithmeticExpressionJS
-        imageData.data[i + 0] = diff >= 0 ? diff : 0
-        imageData.data[i + 1] = diff < 0 ? -diff : 0
-        imageData.data[i + 2] = 0
-        imageData.data[i + 3] = 255
-      }
-      let threshold = 400 / (mipLevel + 1) ** 2
-      await assert.imagesTest([refImage, computedImage, imageData], ['pysift reference', 'computed', `magnified diff`], `pysift comparison ${fileName},  real diff range is ${max_diff - min_diff + 1}/255, sqDiff: ${sqDiff.toFixed(1)} < ${threshold.toFixed(1)}`, sqDiff < threshold)
-    }
 
-    for (let mip = 0; mip < 6; mip++) {
-      for (let j = 0; j < 6; j++) {
-        await compareToPysift(`pysift_ref/gaussian_image_mip${mip}_${j}.png`, 'outputTexture', mip, j, false)
+      for (let mip = 0; mip < 6; mip++) {
+        for (let j = 0; j < 6; j++) {
+          await compareToPysift(`pysift_ref/gaussian_image_mip${mip}_${j}.png`, 'outputTexture', mip, j, false)
+        }
       }
-    }
-    for (let mip = 0; mip < 6; mip++) {
-      for (let j = 0; j < 5; j++) {
-        await compareToPysift(`pysift_ref/dog_mip${mip}_${j}.png`, 'diffTexture', mip, j, true)
+      for (let mip = 0; mip < 6; mip++) {
+        for (let j = 0; j < 5; j++) {
+          await compareToPysift(`pysift_ref/dog_mip${mip}_${j}.png`, 'diffTexture', mip, j, true)
+        }
       }
-    }
 
-    const extremaCounter = new Uint32Array(await allocatedShader.getBuffer(allocatedShader.totalExtremaBuffer))
-    const extremaBuffer = new Float32Array(await allocatedShader.getBuffer(allocatedShader.extremaBuffer, extremaCounter[0] * 4 * 4))
-    console.log('extremaCounter', extremaCounter)
-    let totalExtrema = 0
-    const extrema = []
-    for (let i = 0; i < extremaBuffer.length; i += 4) {
-      const extremum = extremaBuffer.slice(i, (i + 4))
-      if (extremum[0] > 0 && extremum[1] > 0) {
-        totalExtrema++
-        extrema.push(extremum)
+      const extremaCounter = new Uint32Array(await allocatedShader.getBuffer(allocatedShader.totalExtremaBuffer))
+      const extremaBuffer = new Float32Array(await allocatedShader.getBuffer(allocatedShader.extremaBuffer, extremaCounter[0] * 4 * 4))
+      console.log('extremaCounter', extremaCounter)
+      let totalExtrema = 0
+      const extrema = []
+      for (let i = 0; i < extremaBuffer.length; i += 4) {
+        const extremum = extremaBuffer.slice(i, (i + 4))
+        if (extremum[0] > 0 && extremum[1] > 0) {
+          totalExtrema++
+          extrema.push(extremum)
+        }
       }
-    }
 
-    console.log('totalExtrema', totalExtrema)
-    console.log('extrema', extrema)
-    const pysiftKeypoints = await (await fetch('pysift_ref/raw_keypoints.json')).json()
-    console.log('pysift_ref', pysiftKeypoints)
-    const textureName = 'diffTexture'
-    const texture = allocatedShader[textureName]
-    const contexts = []
-    for (let mipLevel = 0; mipLevel < texture.mipLevelCount; mipLevel++) {
-      contexts.push([])
-      for (let index = 0; index < texture.depthOrArrayLayers; index++) {
-        let texture = await allocatedShader.getTexture(textureName, mipLevel, index)
-        const canvas = new OffscreenCanvas(texture.width, texture.height)
-        let context = canvas.getContext('2d')
-        contexts[contexts.length - 1].push(context)
-        context.putImageData(texture, 0, 0)
-        context.fillStyle = 'green'
+      console.log('totalExtrema', totalExtrema)
+      console.log('extrema', extrema)
+      const pysiftKeypoints = await (await fetch('pysift_ref/raw_keypoints.json')).json()
+      console.log('pysift_ref', pysiftKeypoints)
+      const textureName = 'diffTexture'
+      const texture = allocatedShader[textureName]
+      const contexts = []
+      for (let mipLevel = 0; mipLevel < texture.mipLevelCount; mipLevel++) {
+        contexts.push([])
+        for (let index = 0; index < texture.depthOrArrayLayers; index++) {
+          let texture = await allocatedShader.getTexture(textureName, mipLevel, index)
+          const canvas = new OffscreenCanvas(texture.width, texture.height)
+          let context = canvas.getContext('2d')
+          contexts[contexts.length - 1].push(context)
+          context.putImageData(texture, 0, 0)
+          context.fillStyle = 'green'
+        }
       }
-    }
-    const perImageSets = {}
+      const perImageSets = {}
 
-    function getSets (key) {
-      let pointSet = perImageSets[key]
-      if (pointSet == null) {
-        pointSet = {computed: new Set(), expected: new Set()}
-        perImageSets[key] = pointSet
+      function getSets (key) {
+        let pointSet = perImageSets[key]
+        if (pointSet == null) {
+          pointSet = {computed: new Set(), expected: new Set()}
+          perImageSets[key] = pointSet
+        }
+        return pointSet
       }
-      return pointSet
-    }
 
-    for (const extremum of extrema) {
-      let pointSet = getSets(`${extremum[3]}|${extremum[2]}`)
-      pointSet.computed.add(`${extremum[0]}|${extremum[1]}|${extremum[3]}|${extremum[2]}`)
-      const ctx = contexts[extremum[3]][extremum[2]]
-      ctx.beginPath()
-      ctx.arc(extremum[0] + 0.5, extremum[1] + 0.5, 2, 0, 2 * Math.PI)
-      ctx.fill()
-    }
-    for (const pyExtremum of pysiftKeypoints) {
-      let pointSet = getSets(`${pyExtremum.octave}|${pyExtremum.idx}`)
-      pointSet.expected.add(`${pyExtremum.x}|${pyExtremum.y}|${pyExtremum.octave}|${pyExtremum.idx}`)
-      const ctx = contexts[pyExtremum.octave][pyExtremum.idx]
-      ctx.globalCompositeOperation = 'lighter'
-      ctx.fillStyle = 'red'
-      ctx.beginPath()
-      ctx.arc(pyExtremum.x + 0.5, pyExtremum.y + 0.5, 2, 0, 2 * Math.PI)
-      ctx.fill()
-    }
+      for (const extremum of extrema) {
+        let pointSet = getSets(`${extremum[3]}|${extremum[2]}`)
+        pointSet.computed.add(`${extremum[0]}|${extremum[1]}|${extremum[3]}|${extremum[2]}`)
+        const ctx = contexts[extremum[3]][extremum[2]]
+        ctx.beginPath()
+        ctx.arc(extremum[0] + 0.5, extremum[1] + 0.5, 2, 0, 2 * Math.PI)
+        ctx.fill()
+      }
+      for (const pyExtremum of pysiftKeypoints) {
+        let pointSet = getSets(`${pyExtremum.octave}|${pyExtremum.idx}`)
+        pointSet.expected.add(`${pyExtremum.x}|${pyExtremum.y}|${pyExtremum.octave}|${pyExtremum.idx}`)
+        const ctx = contexts[pyExtremum.octave][pyExtremum.idx]
+        ctx.globalCompositeOperation = 'lighter'
+        ctx.fillStyle = 'red'
+        ctx.beginPath()
+        ctx.arc(pyExtremum.x + 0.5, pyExtremum.y + 0.5, 2, 0, 2 * Math.PI)
+        ctx.fill()
+      }
 
-    for (let i = 0; i < contexts.length; i++) {
-      const mipCtx = contexts[i]
-      for (let j = 0; j < mipCtx.length; j++) {
-        const key = `${i}|${j}`
-        let pointSet = getSets(key)
-        let missRatio = pointSet.expected.symmetricDifference(pointSet.computed).size / pointSet.expected.size * 100
-        if (pointSet.expected.size === 0)
-          missRatio = 0
-        console.log('## missRatio', key, missRatio, pointSet.expected.size)
-        const context = mipCtx[j]
-        const overlayTexture = context.getImageData(0, 0, context.canvas.width, context.canvas.height)
-        await assert.imageTest(testImage, overlayTexture, `Extrema. stack index: ${j}, mip level: ${i} 
+      for (let i = 0; i < contexts.length; i++) {
+        const mipCtx = contexts[i]
+        for (let j = 0; j < mipCtx.length; j++) {
+          const key = `${i}|${j}`
+          let pointSet = getSets(key)
+          let missRatio = pointSet.expected.symmetricDifference(pointSet.computed).size / pointSet.expected.size * 100
+          if (pointSet.expected.size === 0)
+            missRatio = 0
+          console.log('## missRatio', key, missRatio, pointSet.expected.size)
+          const context = mipCtx[j]
+          const overlayTexture = context.getImageData(0, 0, context.canvas.width, context.canvas.height)
+          await assert.imageTest(testImage, overlayTexture, `Extrema. stack index: ${j}, mip level: ${i} 
         miss ratio: ${missRatio.toFixed(1)}%, red is pysift, green is computed, orange is overlap`, missRatio < 22)
+        }
       }
+    } finally {
+      allocatedShader.destroy()
     }
   })
 
@@ -274,72 +279,87 @@ export async function testGaussianBlurShader (device) {
       }
 
       const quenelle = computeGaussianKernel(kernelRadius / 3, kernelRadius)
-
-      let allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, width, height, [quenelle], HORIZONTAL)
-      let outputData = await allocatedShader.runShader()
-
-      console.log('####outputData', outputData.width, outputData.height, outputData.constructor.name)
-      // Test horizontal blur
-      let whiteRowUntouched = true
-      for (let x = 0; x < width; x++) {
-        let y = 0 //first row should be white
-        const index = (y * width + x) * 4
-        const isWhite = outputData.data[index] === 255 && outputData.data[index + 1] === 255 && outputData.data[index + 2] === 255
-        whiteRowUntouched &= isWhite
-        if (!isWhite) {
-          console.log(`expected white pixel at ${[x, y]}, got ${[outputData.data[index], outputData.data[index + 1], outputData.data[index + 2], outputData.data[index + 3]]}`)
-        }
-      }
-
-      assert.ok(whiteRowUntouched, 'Horizontal blur: White row 0 should remain untouched')
-      // Display input and output images for this assertion
-      await assert.imageTest(inputImage, outputData, `Horizontal blur: Input and output. GPU time: ${allocatedShader.gpuTime}`, whiteRowUntouched)
-
       const euclideanDistance = (a, b) => Math.hypot(...Object.keys(a).map(k => b[k] - a[k]))
       const gray = [160, 160, 160]
-      let grayRowDetected = true
-      for (let x = 20; x < width - 20; x++) {
-        let y = 1
-        grayRowDetected &= checkColor(y, width, x, outputData.data, euclideanDistance, gray, 'gray')
+
+      let allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, width, height, [quenelle], HORIZONTAL)
+      try {
+
+        let outputData = await allocatedShader.runShader()
+
+        console.log('####outputData', outputData.width, outputData.height, outputData.constructor.name)
+        // Test horizontal blur
+        let whiteRowUntouched = true
+        for (let x = 0; x < width; x++) {
+          let y = 0 //first row should be white
+          const index = (y * width + x) * 4
+          const isWhite = outputData.data[index] === 255 && outputData.data[index + 1] === 255 && outputData.data[index + 2] === 255
+          whiteRowUntouched &= isWhite
+          if (!isWhite) {
+            console.log(`expected white pixel at ${[x, y]}, got ${[outputData.data[index], outputData.data[index + 1], outputData.data[index + 2], outputData.data[index + 3]]}`)
+          }
+        }
+
+        assert.ok(whiteRowUntouched, 'Horizontal blur: White row 0 should remain untouched')
+        // Display input and output images for this assertion
+        await assert.imageTest(inputImage, outputData, `Horizontal blur: Input and output. GPU time: ${allocatedShader.gpuTime}`, whiteRowUntouched)
+
+        let grayRowDetected = true
+        for (let x = 20; x < width - 20; x++) {
+          let y = 1
+          grayRowDetected &= checkColor(y, width, x, outputData.data, euclideanDistance, gray, 'gray')
+        }
+
+        assert.ok(grayRowDetected, 'Horizontal blur: Checkered row 1 should be blurred to gray')
+        // Display input and output images for this assertion
+        await assert.imageTest(inputImage, outputData, `Horizontal blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, grayRowDetected)
+      } finally {
+        allocatedShader.destroy()
       }
-
-      assert.ok(grayRowDetected, 'Horizontal blur: Checkered row 1 should be blurred to gray')
-      // Display input and output images for this assertion
-      await assert.imageTest(inputImage, outputData, `Horizontal blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, grayRowDetected)
-
       // Vertical test
       allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, width, height, [quenelle], VERTICAL)
-      outputData = await allocatedShader.runShader()
-      let whiteColumnUntouched = true
-      for (let y = 0; y < height; y++) {
-        let x = 0 //first column should be white
-        whiteColumnUntouched &= checkColor(y, width, x, outputData.data, euclideanDistance, [255, 255, 255], 'white')
+      try {
+        const outputData = await allocatedShader.runShader()
+        let whiteColumnUntouched = true
+        for (let y = 0; y < height; y++) {
+          let x = 0 //first column should be white
+          whiteColumnUntouched &= checkColor(y, width, x, outputData.data, euclideanDistance, [255, 255, 255], 'white')
+        }
+
+        assert.ok(whiteColumnUntouched, 'Vertical blur: White column 0 should remain untouched')
+        // Display input and output images for this assertion
+        await assert.imageTest(inputImage, outputData, `Vertical blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, whiteColumnUntouched)
+
+        let grayColumnDetected = true
+        for (let y = 20; y < height - 20; y++) {
+          const x = 1
+          grayColumnDetected &= checkColor(y, width, x, outputData.data, euclideanDistance, gray, 'gray')
+        }
+
+        assert.ok(grayColumnDetected, 'Vertical blur: Checkered column 1 should be blurred to gray')
+        // Display input and output images for this assertion
+        await assert.imageTest(inputImage, outputData, 'Vertical blur: Input and output images', grayColumnDetected)
+      } finally {
+        allocatedShader.destroy()
       }
 
-      assert.ok(whiteColumnUntouched, 'Vertical blur: White column 0 should remain untouched')
-      // Display input and output images for this assertion
-      await assert.imageTest(inputImage, outputData, `Vertical blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, whiteColumnUntouched)
-
-      let grayColumnDetected = true
-      for (let y = 20; y < height - 20; y++) {
-        const x = 1
-        grayColumnDetected &= checkColor(y, width, x, outputData.data, euclideanDistance, gray, 'gray')
-      }
-
-      assert.ok(grayColumnDetected, 'Vertical blur: Checkered column 1 should be blurred to gray')
-      // Display input and output images for this assertion
-      await assert.imageTest(inputImage, outputData, 'Vertical blur: Input and output images', grayColumnDetected)
       ts = await RadialShader.createShaders(device)
       allocatedShader = await ts.createGPUResources(workgroupSize, inputImage, inputImage.width, inputImage.height, [quenelle])
-      outputImage = await allocatedShader.runShader()
-      await assert.imageTest(inputImage, outputImage, `Blur, running both passes. GPU time: ${allocatedShader.gpuTime}`, whiteColumnUntouched)
-
+      try {
+        outputImage = await allocatedShader.runShader()
+        await assert.imageTest(inputImage, outputImage, `Blur, running both passes. GPU time: ${allocatedShader.gpuTime}`, true)
+      } finally {
+        allocatedShader.destroy()
+      }
       let testImage = await createImageBitmap(await (await fetch('3916587d9b.png')).blob())
       ts = await RadialShader.createShaders(device)
       allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, [quenelle])
-      outputImage = await allocatedShader.runShader()
-      await assert.imageTest(testImage, outputImage, `Complete blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, true)
-
+      try {
+        outputImage = await allocatedShader.runShader()
+        await assert.imageTest(testImage, outputImage, `Complete blur: Input and output images. GPU time: ${allocatedShader.gpuTime}`, true)
+      } finally {
+        allocatedShader.destroy()
+      }
       console.time('createImageBitmap')
       testImage = await createImageBitmap(await (await fetch('NASM-A20150317000-NASM2018-10769.jpg')).blob())
       console.log('testImage size', testImage.width, testImage.height)
@@ -348,16 +368,20 @@ export async function testGaussianBlurShader (device) {
       const gaussians = [1.2262734984654078, 1.5450077936447955, 1.9465878414647133, 2.4525469969308156, 3.090015587289591]
       const gs = gaussians.map(sigma => computeGaussianKernel(sigma))
       allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, gs)
-      outputImage = await allocatedShader.runShader()
-      const index = 3
-      const mipLevel = 4
-      await assert.imageTest(testImage, await allocatedShader.getTexture('outputTexture', mipLevel, index), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
-      if (false) {
-        for (let mipLevel = 0; mipLevel < 8; mipLevel++) {
-          for (let index = 0; index < gaussians.length; index++) {
-            await assert.imageTest(testImage, await allocatedShader.getTexture('outputTexture', mipLevel, index), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
+      try {
+        outputImage = await allocatedShader.runShader()
+        const index = 3
+        const mipLevel = 4
+        await assert.imageTest(testImage, await allocatedShader.getTexture('outputTexture', mipLevel, index), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
+        if (false) {
+          for (let mipLevel = 0; mipLevel < 8; mipLevel++) {
+            for (let index = 0; index < gaussians.length; index++) {
+              await assert.imageTest(testImage, await allocatedShader.getTexture('outputTexture', mipLevel, index), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
+            }
           }
         }
+      } finally {
+        allocatedShader.destroy()
       }
     } catch (error) {
       console.error('Error testing Gaussian Blur Shader:', error)

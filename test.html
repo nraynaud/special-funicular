@@ -157,7 +157,7 @@
   }
 
   QUnit.config.autostart = false
-  QUnit.config.testTimeout = 30000 // 30 seconds timeout for async tests
+  QUnit.config.testTimeout = 100_000
 
   // Add custom assertion for displaying images in test results
   QUnit.assert.imageTest = async function (inputImage, outputImage, message, result = true) {

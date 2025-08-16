@@ -4,8 +4,13 @@ import {
   makeStructuredView,
 } from './lib/webgpu-utils.module.js'
 
+import { WgslReflect } from './lib/wgsl_reflect.module.js'
+
 export const HORIZONTAL = 1
 export const VERTICAL = 2
+
+const WG_SIZE_XY = 8
+const WG_SIZE_LINEAR = 64
 
 export function quadraticDiff (a, b) {
   return Math.sqrt(a ** 2 - b ** 2)
@@ -50,16 +55,19 @@ class AllocatedRadialShader {
     console.assert(oneDirection == null || kernels.length === 1, `can use oneDirection parameter only when there is only one kernel, found ${kernels.length} kernels`)
     const extremaBorder = 5
     const resources = new AllocatedRadialShader(shader)
+    resources.destroyables = []
     resources.device = shader.device
     resources.pipelines = shader.pipelines
     resources.kernelBuffers = kernels.map(k => {
       const kernelBuffer = shader.device.createBuffer({
         label: 'kernel', size: k.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       })
+      resources.destroyables.push(kernelBuffer)
       shader.device.queue.writeBuffer(kernelBuffer, 0, k)
       return kernelBuffer
     })
     resources.rgbaTexture = await imageToTextureMaybeDoubled(shader.device, inputImage, oneDirection === null)
+    resources.destroyables.push(resources.rgbaTexture)
     resources.wasDoubled = resources.rgbaTexture.width !== inputImage.width
     const outputWidth = resources.rgbaTexture.width
     const outputHeight = resources.rgbaTexture.height
@@ -80,6 +88,7 @@ class AllocatedRadialShader {
       format: 'r32sint',
       usage: EVERYTHING_TEXTURE
     })
+    resources.destroyables.push(resources.outputTexture)
     for (let i = 0; i < mipLevels; i++) {
       console.log('mipLevel', i, resources.mipSize(i))
     }
@@ -90,6 +99,7 @@ class AllocatedRadialShader {
       format: 'r32sint',
       usage: EVERYTHING_TEXTURE
     })
+    resources.destroyables.push(resources.diffTexture)
     // do not use a 3d texture, because mipmapping would also divide the Z axis
     resources.diffTextureView = createMipViewArray(resources.diffTexture)
     resources.outViewsArray = resources.outputTexture.createView({
@@ -102,6 +112,7 @@ class AllocatedRadialShader {
       format: 'r32sint',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING
     })
+    resources.destroyables.push(resources.tempTexture)
     resources.tempView = resources.tempTexture.createView({dimension: '2d'})
     resources.tempViewStorage = createMipViewArray(resources.tempTexture)
     resources.outViewsStorage = []
@@ -117,6 +128,7 @@ class AllocatedRadialShader {
     resources.outputBuffer = shader.device.createBuffer({
       label: 'outputBuffer', size: bytesPerRow * outputHeight, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
     })
+    resources.destroyables.push(resources.outputBuffer)
     const workgroupSize = shader.pipelineDescs['single_pass_radial'].compute.constants.workgroup_size
     const horizontalWorkGroups = [Math.ceil(resources.outputWidth / workgroupSize), resources.outputHeight]
     const verticalWorkGroups = [Math.ceil(resources.outputHeight / workgroupSize), resources.outputWidth]
@@ -139,10 +151,16 @@ class AllocatedRadialShader {
       size: view.arrayBuffer.byteLength,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-
+    this.destroyables.push(buff)
     view.set(values)
     this.device.queue.writeBuffer(buff, 0, view.arrayBuffer)
     return buff
+  }
+
+  destroy () {
+    for (const elem of this.destroyables) {
+      elem.destroy()
+    }
   }
 
   async encodeConvertToGray (computePass) {
@@ -151,7 +169,7 @@ class AllocatedRadialShader {
       parameters: this.createUniformBuffer({from_mip: 0}),
       output_gray: this.outViewsStorage[0][0]
     })
-    dispatchSquare(computePass, this.outputWidth, this.outputHeight, 8)
+    dispatchSquare(computePass, this.outputWidth, this.outputHeight, WG_SIZE_XY)
   }
 
   async encodeConvertFromGray (computePass, inputTextureView, convertNegative = false) {
@@ -161,15 +179,15 @@ class AllocatedRadialShader {
       parameters: this.createUniformBuffer({from_mip: 0, from_gray_negative: convertNegative ? 1 : 0}),
       output_rgba: this.rgbaTextureView
     })
-    dispatchSquare(computePass, this.outputWidth, this.outputHeight, 8)
+    dispatchSquare(computePass, this.outputWidth, this.outputHeight, WG_SIZE_XY)
   }
 
   mipSize (mipLevel) {
     return getSizeForMipFromTexture(this.outputTexture, mipLevel).slice(0, 2)
   }
 
-  workgroups88Mip (mipLevel) {
-    return this.mipSize(mipLevel).map(d => Math.ceil(d / 8))
+  workgroupsSquareMip (mipLevel, wgSide = 8) {
+    return this.mipSize(mipLevel).map(d => Math.ceil(d / wgSide))
   }
 
   async encodeRepeatedPasses (workgroupSize, extremaBorder) {
@@ -250,7 +268,7 @@ class AllocatedRadialShader {
           gaussian_textures: this.outViewsStorage[0][mipLevel],
           parameters: this.createUniformBuffer({from_mip: mipLevel - 1})
         })
-        dispatchSquare(computePass, outputWidth, outputHeight, 8)
+        dispatchSquare(computePass, outputWidth, outputHeight, WG_SIZE_XY)
         effort += outputWidth * outputHeight
       }
       const horizontalWorkGroups = [Math.ceil(outputWidth / workgroupSize), outputHeight]
@@ -291,7 +309,7 @@ class AllocatedRadialShader {
         diff_input_stack: this.outViewsArray,
         diff_output_stack: this.diffTextureView[mip]
       })
-      const [wgW, wgH] = this.workgroups88Mip(mip)
+      const [wgW, wgH] = this.workgroupsSquareMip(mip, WG_SIZE_XY)
       computePass.dispatchWorkgroups(wgW, wgH, this.diffTexture.depthOrArrayLayers)
     }
     effort += outputWidth * outputHeight * this.diffTexture.depthOrArrayLayers * 1.25
@@ -308,7 +326,7 @@ class AllocatedRadialShader {
       usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
     })
     for (let mip = 0; mip < this.outputTexture.mipLevelCount; mip++) {
-      const [wgW, wgH] = this.workgroups88Mip(mip)
+      const [wgW, wgH] = this.workgroupsSquareMip(mip, WG_SIZE_XY)
       await encodePipePrep(this.device, computePass, extremaPipeline, this.shader.extremaShader.defs.entryPoints['extrema'].resources, {
         parameters: this.createUniformBuffer({
           extrema_threshold: 1 / 255,
@@ -475,8 +493,11 @@ export class RadialShader {
   }
 
   static async createShaders (device) {
-    const {pipelines, defs, descriptors} = await loadWgsl(device, 'radial.wgsl', {workgroup_size: 64})
-    const extremaShader = await loadWgsl(device, 'extrema.wgsl', {workgroupxy_size: 8})
+    const {pipelines, defs, descriptors} = await loadWgsl(device, 'radial.wgsl', {
+      workgroup_size: WG_SIZE_LINEAR,
+      workgroupxy_size: WG_SIZE_XY
+    })
+    const extremaShader = await loadWgsl(device, 'extrema.wgsl', {workgroupxy_size: WG_SIZE_XY})
     let shader = new RadialShader(device, pipelines, descriptors, defs, extremaShader)
     shader.uniformsView = makeStructuredView(shader.defs.uniforms.parameters)
     shader.extremaUniformsView = makeStructuredView(extremaShader.defs.uniforms.parameters)
@@ -546,8 +567,7 @@ export async function imageToTextureMaybeDoubled (device, inputImage, tryDouble 
     usage: EVERYTHING_TEXTURE
   })
   try {
-    const wgSizeXY = 8
-    const {pipelines, defs} = await loadWgsl(device, 'resize.wgsl', {workgroupxy_size: wgSizeXY})
+    const {pipelines, defs} = await loadWgsl(device, 'resize.wgsl', {workgroupxy_size: WG_SIZE_XY})
     const commandEncoder = device.createCommandEncoder()
     const computePass = commandEncoder.beginComputePass({label: 'image doubling compute pass'})
     await encodePipePrep(device, computePass, pipelines['resize'], defs.entryPoints['resize'].resources, {
@@ -555,7 +575,7 @@ export async function imageToTextureMaybeDoubled (device, inputImage, tryDouble 
       input_texture: inputTexture.createView(),
       output_texture: outputTexture.createView()
     })
-    dispatchSquare(computePass, outputWidth, outputHeight, wgSizeXY)
+    dispatchSquare(computePass, outputWidth, outputHeight, WG_SIZE_XY)
     computePass.end()
     device.queue.submit([commandEncoder.finish()])
     return outputTexture
