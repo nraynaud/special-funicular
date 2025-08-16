@@ -78,6 +78,7 @@ fn to_gray(texel: vec4f) -> vec4f {
 }
 
 @compute @workgroup_size(workgroup_size, 1)
+// one invocation per output pixel
 fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>) {
@@ -138,8 +139,9 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
     }
 }
 
-// copy or resize
+// copy or resize without filtering
 @compute @workgroup_size(workgroupxy_size, workgroupxy_size, 1)
+// one invocation per output pixel
 fn copy(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var pixel_pos = vec2i(global_id.xy);
     let output_size = vec2i(textureDimensions(gaussian_textures));
@@ -151,6 +153,7 @@ fn copy(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 
 @compute @workgroup_size(workgroupxy_size, workgroupxy_size, 1)
+// one invocation per output pixel
 fn subtract(@builtin(global_invocation_id) global_id: vec3<u32>,
         @builtin(workgroup_id) workgroup_id: vec3<u32>,
         @builtin(local_invocation_id) local_id: vec3<u32>) {
@@ -164,6 +167,7 @@ fn subtract(@builtin(global_invocation_id) global_id: vec3<u32>,
 }
 
 @compute @workgroup_size(workgroupxy_size, workgroupxy_size, 1)
+// one invocation per output pixel
 fn convert_to_gray(@builtin(global_invocation_id) global_id: vec3<u32>,
         @builtin(workgroup_id) workgroup_id: vec3<u32>,
         @builtin(local_invocation_id) local_id: vec3<u32>) {
@@ -176,6 +180,7 @@ fn convert_to_gray(@builtin(global_invocation_id) global_id: vec3<u32>,
 }
 
 @compute @workgroup_size(workgroupxy_size, workgroupxy_size, 1)
+// one invocation per output pixel
 fn convert_from_gray(@builtin(global_invocation_id) global_id: vec3<u32>,
         @builtin(workgroup_id) workgroup_id: vec3<u32>,
         @builtin(local_invocation_id) local_id: vec3<u32>) {

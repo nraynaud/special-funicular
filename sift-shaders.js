@@ -315,7 +315,7 @@ class AllocatedRadialShader {
           extrema_border: extremaBorder,
           from_mip: mip
         }, this.shader.extremaUniformsView),
-        diff_stack: this.diffTextureView[mip],
+        diff_stack: this.diffTexture.createView(),
         extrema_storage: this.extremaBuffer,
         extrema_count: this.totalExtremaBuffer
       })
