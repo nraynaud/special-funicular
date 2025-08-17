@@ -63,7 +63,7 @@ fn get_hessian(mip: i32, pos: vec3i) -> mat3x3f {
 
 fn compute_least_squares(hessian: mat3x3f, gradient: vec3f) -> vec4f {
     //generated with AI
-    // return the pos correction in the first 3 values and last position is the value correction.
+    // return the pos correction in the first 3 values and the last dimension is the value correction.
     // Solve Hx = -g for x, where H is the Hessian and g is the gradient
     let det = determinant(hessian);
     // Check if matrix is invertible
