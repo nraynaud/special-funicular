@@ -166,7 +166,7 @@ export async function testGaussianBlurShader (device) {
       }
 
       const extremaCounter = new Uint32Array(await allocatedShader.getBuffer(allocatedShader.totalExtremaBuffer))
-      const extremaBuffer = new Float32Array(await allocatedShader.getBuffer(allocatedShader.extremaBuffer, extremaCounter[0] * 4 * 4))
+      const extremaBuffer = new Float32Array(await allocatedShader.getBuffer(allocatedShader.rawExtremaBuffer, extremaCounter[0] * 4 * 4))
       console.log('extremaCounter', extremaCounter)
       let totalExtrema = 0
       const extrema = []
@@ -210,7 +210,7 @@ export async function testGaussianBlurShader (device) {
       for (const extremum of extrema) {
         let pointSet = getSets(`${extremum[3]}|${extremum[2]}`)
         pointSet.computed.add(`${extremum[0]}|${extremum[1]}|${extremum[3]}|${extremum[2]}`)
-        const ctx = contexts[extremum[3]][extremum[2]]
+        const ctx = contexts[Math.round(extremum[3])][Math.round(extremum[2])]
         ctx.beginPath()
         ctx.arc(extremum[0] + 0.5, extremum[1] + 0.5, 2, 0, 2 * Math.PI)
         ctx.fill()

@@ -1,10 +1,9 @@
 import {
+  getSizeAndAlignmentOfUnsizedArrayElement,
   getSizeForMipFromTexture,
   makeShaderDataDefinitions,
   makeStructuredView,
 } from './lib/webgpu-utils.module.js'
-
-import { WgslReflect } from './lib/wgsl_reflect.module.js'
 
 export const HORIZONTAL = 1
 export const VERTICAL = 2
@@ -190,7 +189,7 @@ class AllocatedRadialShader {
     return this.mipSize(mipLevel).map(d => Math.ceil(d / wgSide))
   }
 
-  async encodeRepeatedPasses (workgroupSize, extremaBorder) {
+  async encodeRepeatedPasses (workgroupSize, extremaBorder, skip_refinement = false) {
     let effort = 0
     let commandEncoder = null
     let computePass = null
@@ -314,26 +313,30 @@ class AllocatedRadialShader {
     }
     effort += outputWidth * outputHeight * this.diffTexture.depthOrArrayLayers * 1.25
     beginSection('get extrema')
-    let extremaPipeline = this.shader.extremaShader.pipelines['extrema']
+    const extremaShader = this.shader.extremaShader
+    let extremaPipeline = extremaShader.pipelines['extrema']
     this.extremaBuffer = this.device.createBuffer({
-      label: 'extremas',
-      size: 2 * 1024 ** 2,
+      label: 'extrema',
+      size: getSizeAndAlignmentOfUnsizedArrayElement(extremaShader.defs.storages.extrema_storage).size * 1024 ** 2,
       usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
     })
     this.totalExtremaBuffer = this.device.createBuffer({
       label: 'total extrema count ',
-      size: 4,
-      usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
+      size: extremaShader.defs.storages.extrema_count.size,
+      usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT,
     })
+    this.destroyables.push(this.extremaBuffer)
+    this.destroyables.push(this.totalExtremaBuffer)
+    const diffStackView = this.diffTexture.createView()
     for (let mip = 0; mip < this.outputTexture.mipLevelCount; mip++) {
       const [wgW, wgH] = this.workgroupsSquareMip(mip, WG_SIZE_XY)
-      await encodePipePrep(this.device, computePass, extremaPipeline, this.shader.extremaShader.defs.entryPoints['extrema'].resources, {
+      await encodePipePrep(this.device, computePass, extremaPipeline, extremaShader.defs.entryPoints['extrema'].resources, {
         parameters: this.createUniformBuffer({
           extrema_threshold: 1 / 255,
           extrema_border: extremaBorder,
           from_mip: mip
         }, this.shader.extremaUniformsView),
-        diff_stack: this.diffTexture.createView(),
+        diff_stack: diffStackView,
         extrema_storage: this.extremaBuffer,
         extrema_count: this.totalExtremaBuffer
       })
@@ -341,6 +344,24 @@ class AllocatedRadialShader {
       computePass.dispatchWorkgroups(wgW, wgH, this.diffTexture.depthOrArrayLayers - 2)
     }
     effort += outputWidth * outputHeight * (this.diffTexture.depthOrArrayLayers - 2) * 1.25
+    closePass()
+    this.rawExtremaBuffer = this.device.createBuffer({
+      label: 'raw extrema',
+      size: this.extremaBuffer.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE,
+    })
+    commandEncoder.copyBufferToBuffer(this.extremaBuffer, this.rawExtremaBuffer)
+    beginSection('refine extrema')
+    if (!skip_refinement) {
+      const extremaRefineShader = this.shader.extremaRefineShader
+      let extremaRefinePipeline = extremaRefineShader.pipelines['extrema_refine']
+      await encodePipePrep(this.device, computePass, extremaRefinePipeline, extremaRefineShader.defs.entryPoints['extrema_refine'].resources, {
+        diff_stack: diffStackView,
+        extrema_storage: this.extremaBuffer,
+        extrema_count: this.totalExtremaBuffer
+      })
+      computePass.dispatchWorkgroupsIndirect(this.totalExtremaBuffer, 4)
+    }
     closeEncoder()
     return result
   }
@@ -498,7 +519,8 @@ export class RadialShader {
       workgroupxy_size: WG_SIZE_XY
     })
     const extremaShader = await loadWgsl(device, 'extrema.wgsl', {workgroupxy_size: WG_SIZE_XY})
-    let shader = new RadialShader(device, pipelines, descriptors, defs, extremaShader)
+    const shader = new RadialShader(device, pipelines, descriptors, defs, extremaShader)
+    shader.extremaRefineShader = await loadWgsl(device, 'extrema_refine.wgsl')
     shader.uniformsView = makeStructuredView(shader.defs.uniforms.parameters)
     shader.extremaUniformsView = makeStructuredView(extremaShader.defs.uniforms.parameters)
     return shader

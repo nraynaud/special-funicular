@@ -1,3 +1,4 @@
+override workgroup_size = 64;
 override workgroupxy_size = 8;
 
 struct Params {
@@ -6,11 +7,18 @@ struct Params {
     extrema_border: i32
 };
 
+struct CountType {
+    count: atomic<u32>,
+    dispatch_x: atomic<u32>,
+    dispatch_y: atomic<u32>,
+    dispatch_z: atomic<u32>
+}
+
 @group(0) @binding(0) var<uniform> parameters: Params;
 @group(0) @binding(1) var diff_stack: texture_2d_array<i32>;
 // 4D position (x, y, scale, mip) of found extrema
 @group(0) @binding(2) var<storage, read_write> extrema_storage: array<vec4f>;
-@group(0) @binding(3) var<storage, read_write> extrema_count: atomic<u32>;
+@group(0) @binding(3) var<storage, read_write> extrema_count: CountType;
 
 const MAX_2_31 = pow(2, 31) - 1.0;
 
@@ -57,7 +65,11 @@ fn extrema(@builtin(global_invocation_id) global_id: vec3<u32>,
             current_min_max = select(combine_min_max(current_min_max, texel), texel, i == 0);
         }
         if abs(current_texel) > i_threshold && (current_texel < current_min_max.x || current_texel > current_min_max.y)  {
-            let extremum_index = atomicAdd(&extrema_count, 1u);
+            let extremum_index = atomicAdd(&extrema_count.count, 1u);
+            let invocation_count = extremum_index / u32(workgroup_size) + select(0u, 1u, extremum_index % u32(workgroup_size) > 0);
+            atomicMax(&extrema_count.dispatch_x, invocation_count);
+            atomicStore(&extrema_count.dispatch_y, 1);
+            atomicStore(&extrema_count.dispatch_z, 1);
             if extremum_index < arrayLength(&extrema_storage) {
                 extrema_storage[extremum_index] = vec4f(vec3f(global_id.xyz), f32(parameters.from_mip));
             }
