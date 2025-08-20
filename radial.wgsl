@@ -1,36 +1,33 @@
 override workgroup_size = 64;
 override workgroupxy_size = 8;
-const use_workgroup_mem = 1;
+const use_workgroup_mem = 0;
 //maxComputeWorkgroupStorageSize is 16384, reserving a bit of leeway
 override workgroup_pixel_count = 16300/4;
-const MAX_2_31 = pow(2, 31) - 1.0;
 
 struct Params {
     horizontal: u32,
     from_mip: u32,
-    convert_to_gray: u32,
     from_gray_negative: u32,
     // used to mimic OpenCV
     border_reflect_101: u32
 };
 
-@group(0) @binding(0) var inputTexture: texture_2d<i32>;
-@group(0) @binding(1) var gaussian_textures: texture_storage_2d<r32sint, read_write>;
+@group(0) @binding(0) var inputTexture: texture_2d<f32>;
+@group(0) @binding(1) var gaussian_textures: texture_storage_2d<r32float, read_write>;
 @group(0) @binding(2) var<uniform> parameters: Params;
 @group(0) @binding(3) var<storage> kernel: array<f32>;
-@group(0) @binding(4) var diff_input_stack: texture_2d_array<i32>;
-@group(0) @binding(5) var diff_output_stack: texture_storage_2d_array<r32sint, read_write>;
-@group(0) @binding(6) var max_input_stack: texture_2d_array<f32>;
+@group(0) @binding(4) var diff_input_stack: texture_2d_array<f32>;
+@group(0) @binding(5) var diff_output_stack: texture_storage_2d_array<r32float, read_write>;
 @group(0) @binding(7) var input_rgba: texture_2d<f32>;
-@group(0) @binding(8) var output_gray: texture_storage_2d<r32sint, write>;
+@group(0) @binding(8) var output_gray: texture_storage_2d<r32float, write>;
 @group(0) @binding(9) var output_rgba: texture_storage_2d<rgba8unorm, write>;
 // 4D position (x, y, scale, mip) of found extrema
 @group(0) @binding(10) var<storage, read_write> extrema_storage: array<vec4f>;
 @group(0) @binding(11) var<storage, read_write> extrema_count: atomic<u32>;
 
-var<workgroup> workgroupPixels: array<u32, workgroup_pixel_count>;
+var<workgroup> workgroupPixels: array<f32, workgroup_pixel_count>;
 
-fn read_input(pix_pos: vec2i) -> vec4i {
+fn read_input(pix_pos: vec2i) -> vec4f {
     return textureLoad(inputTexture, pix_pos, parameters.from_mip);
 }
 
@@ -61,13 +58,13 @@ fn fill_workgroup_mem(direction: vec2i, workgroup_pos: vec2i, local_pos: vec2i, 
         let samplePos = (myFirstInputPosition + direction * i) * io_ratio;
         if all(samplePos >= vec2i(0, 0)) && all(samplePos < inputSize) {
             let texel = read_input(samplePos);
-            workgroupPixels[myFirstWritePixel + i] = u32(texel.r);
+            workgroupPixels[myFirstWritePixel + i] = texel.r;
         }
     }
     workgroupBarrier();
 }
 
-fn read_workgroup_mem(pix_pos: vec2i, workgroup_pos: vec2i, direction: vec2i, kernel_radius: i32) -> u32 {
+fn read_workgroup_mem(pix_pos: vec2i, workgroup_pos: vec2i, direction: vec2i, kernel_radius: i32) -> f32 {
     let sample_pos = dot((pix_pos - workgroup_pos), direction) + kernel_radius - 1;
     return workgroupPixels[sample_pos];
 }
@@ -120,22 +117,22 @@ fn single_pass_radial(@builtin(global_invocation_id) global_id: vec3<u32>,
         // using outputsize because the workgroup mem is at outputSize sampling rate
         if all(pix_read_pos >= vec2i(0, 0)) && all(pix_read_pos < output_size) {
             let weight = kernel[abs(i)];
-            var texel: u32;
+            var texel: f32;
             if use_workgroup_mem != 0 {
                 texel = read_workgroup_mem(pix_read_pos, workgroup_pos, direction, kernel_radius);
             } else {
-                texel = u32(read_input(pix_read_pos * io_ratio).r);
+                texel = read_input(pix_read_pos * io_ratio).r;
             }
             sum += f32(texel) * weight;
             weightSum += weight;
         }
     }
     if weightSum == 0.0 {
-        textureStore(gaussian_textures, pixel_pos, vec4i(0, 0, 0, 0));
+        textureStore(gaussian_textures, pixel_pos, vec4f(0));
     } else {
         var result: f32;
         result = sum / weightSum;
-        textureStore(gaussian_textures, pixel_pos, vec4i(i32(result)));
+        textureStore(gaussian_textures, pixel_pos, vec4f(result));
     }
 }
 
@@ -160,9 +157,9 @@ fn subtract(@builtin(global_invocation_id) global_id: vec3<u32>,
     let pixel_pos = vec2i(global_id.xy);
     let array_index = global_id.z;
     if all(pixel_pos >= vec2i(0)) && all(pixel_pos < vec2i(textureDimensions(diff_input_stack, parameters.from_mip)) ) {
-        let pix1 = textureLoad(diff_input_stack, pixel_pos, array_index, parameters.from_mip);
-        let pix2 = textureLoad(diff_input_stack, pixel_pos, array_index + 1, parameters.from_mip);
-        textureStore(diff_output_stack, pixel_pos, array_index, vec4i(pix2.r - pix1.r));
+        let pix1 = f32(textureLoad(diff_input_stack, pixel_pos, array_index, parameters.from_mip).r);
+        let pix2 = f32(textureLoad(diff_input_stack, pixel_pos, array_index + 1, parameters.from_mip).r);
+        textureStore(diff_output_stack, pixel_pos, array_index, vec4f(pix2 - pix1));
     }
 }
 
@@ -174,8 +171,7 @@ fn convert_to_gray(@builtin(global_invocation_id) global_id: vec3<u32>,
     let pixel_pos = vec2i(global_id.xy);
     if all(pixel_pos >= vec2i(0)) && all(pixel_pos < vec2i(textureDimensions(input_rgba, parameters.from_mip))) {
         let pix = textureLoad(input_rgba, pixel_pos, parameters.from_mip);
-        let gray = to_gray(pix);
-        textureStore(output_gray, pixel_pos, vec4i(i32(gray.r * MAX_2_31)));
+        textureStore(output_gray, pixel_pos, to_gray(pix));
     }
 }
 
@@ -187,7 +183,7 @@ fn convert_from_gray(@builtin(global_invocation_id) global_id: vec3<u32>,
     let pixel_pos = vec2i(global_id.xy);
     if all(pixel_pos >= vec2i(0)) && all(pixel_pos < vec2i(textureDimensions(inputTexture, parameters.from_mip))) {
         let pix = textureLoad(inputTexture, pixel_pos, parameters.from_mip);
-        var luminance = f32(pix.r) / MAX_2_31;
+        var luminance = pix.r;
         if parameters.from_gray_negative != 0 {
             luminance = luminance / 2.0 + 0.5;
         }

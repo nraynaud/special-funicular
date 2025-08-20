@@ -84,7 +84,7 @@ class AllocatedRadialShader {
       label: 'output',
       size: [outputWidth, outputHeight, kernels.length + 1],
       mipLevelCount: mipLevels,
-      format: 'r32sint',
+      format: 'r32float',
       usage: EVERYTHING_TEXTURE
     })
     resources.destroyables.push(resources.outputTexture)
@@ -95,7 +95,7 @@ class AllocatedRadialShader {
       label: 'diff',
       size: [outputWidth, outputHeight, Math.max(1, resources.outputTexture.depthOrArrayLayers - 1)],
       mipLevelCount: mipLevels,
-      format: 'r32sint',
+      format: 'r32float',
       usage: EVERYTHING_TEXTURE
     })
     resources.destroyables.push(resources.diffTexture)
@@ -108,7 +108,7 @@ class AllocatedRadialShader {
       label: 'temp',
       size: [outputWidth, outputHeight],
       mipLevelCount: mipLevels,
-      format: 'r32sint',
+      format: 'r32float',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING
     })
     resources.destroyables.push(resources.tempTexture)
@@ -358,7 +358,8 @@ class AllocatedRadialShader {
       await encodePipePrep(this.device, computePass, extremaRefinePipeline, extremaRefineShader.defs.entryPoints['extrema_refine'].resources, {
         diff_stack: diffStackView,
         extrema_storage: this.extremaBuffer,
-        extrema_count: this.totalExtremaBuffer
+        extrema_count: this.totalExtremaBuffer,
+        parameters: this.createUniformBuffer({extrema_border: 5})
       })
       computePass.dispatchWorkgroupsIndirect(this.totalExtremaBuffer, 4)
     }
@@ -436,7 +437,7 @@ class AllocatedRadialShader {
     const [outW, outH, _layers] = getSizeForMipFromTexture(texture, mipLevel)
     const bytesPerRow = Math.ceil((outW * 4) / 256) * 256
     let sourceTexture = {texture: texture, origin: [0, 0, index], mipLevel: mipLevel}
-    if (texture.format === 'r32sint') {
+    if (texture.format === 'r32float') {
       const computePass = commandEncoder.beginComputePass({
         label: 'gray to RGBA compute pass',
       })

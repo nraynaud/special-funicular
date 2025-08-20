@@ -1,7 +1,9 @@
+import { KDTree } from './kdtree.js'
+import { createTextureFromSource } from './lib/webgpu-utils.module.js'
 import {
   computeGaussianKernel,
   computeGaussianValue,
-  HORIZONTAL,
+  HORIZONTAL, loadWgsl,
   quadraticDiff,
   RadialShader,
   VERTICAL,
@@ -26,13 +28,6 @@ export async function runShaderTests () {
     })
     device.addEventListener('uncapturederror', (event) => {
       console.error(event.error.message)
-    })
-    QUnit.module('Shader Tests', {
-      before: function () {
-        console.log('Starting shader tests module')
-      }, after: function () {
-        console.log('Completed shader tests module')
-      }
     })
 
     await testGaussianBlurShader(device)
@@ -109,9 +104,19 @@ export async function testGaussianBlurShader (device) {
     }
     assert.closeTo(sum, 1, 0.00001, `gaussian kernel sum expected to be one, actual: ${sum}`)
   })
+/*
+  QUnit.test('refinement shader', async assert => {
+    const testDiffTextureContent0 = [].concat([0, 0, 0], [0, 0, 0], [0, 0, 0])
+    const testDiffTextureContent1 = [].concat([0, 0, 0], [0, 1, 0], [0, 0, 0])
+    const testDiffTextureContent2 = [].concat([0, 0, 0], [0, 0, 0], [0, 0, 0])
+    const texture = createTextureFromSource(device, [testDiffTextureContent0, testDiffTextureContent1, testDiffTextureContent2], {format: 'r32float'})
+    const extremaRefineShader = await loadWgsl(device, 'extrema_refine.wgsl')
 
+  })
+*/
   QUnit.test('Compare with pysift', async assert => {
     let ts = await RadialShader.createShaders(device, kernelRadius, workgroupSize)
+    const sigma = 1.6
     const gaussians = [1.2262734984654078, 1.5450077936447955, 1.9465878414647133, 2.4525469969308156, 3.090015587289591]
     const gs = gaussians.map(sigma => computeGaussianKernel(sigma))
     console.log('gaussians', gs)
@@ -164,24 +169,49 @@ export async function testGaussianBlurShader (device) {
           await compareToPysift(`pysift_ref/dog_mip${mip}_${j}.png`, 'diffTexture', mip, j, true)
         }
       }
+      const pysiftRawKeypoints = await (await fetch('pysift_ref/raw_keypoints.json')).json()
+      console.log('pysift_raw_ref', pysiftRawKeypoints)
+
+      const pysiftRefinedKeypoints = pysiftRawKeypoints.filter(p => p.refined !== null)
+
+      console.log('pysift_refined_ref', pysiftRefinedKeypoints)
+      const kdTree = new KDTree([p => p.x, p => p.y, p => p.octave * p.idx], pysiftRefinedKeypoints, false)
+      console.log('kdTree', kdTree)
+      console.log('kdTree test', kdTree.findNN(pysiftRefinedKeypoints[10]), 'expected: ', pysiftRefinedKeypoints[10])
 
       const extremaCounter = new Uint32Array(await allocatedShader.getBuffer(allocatedShader.totalExtremaBuffer))
-      const extremaBuffer = new Float32Array(await allocatedShader.getBuffer(allocatedShader.rawExtremaBuffer, extremaCounter[0] * 4 * 4))
+      const rawExtremaBuffer = new Float32Array(await allocatedShader.getBuffer(allocatedShader.rawExtremaBuffer, extremaCounter[0] * 4 * 4))
+      const refinedExtremaBuffer = new Float32Array(await allocatedShader.getBuffer(allocatedShader.extremaBuffer, extremaCounter[0] * 4 * 4))
       console.log('extremaCounter', extremaCounter)
       let totalExtrema = 0
-      const extrema = []
-      for (let i = 0; i < extremaBuffer.length; i += 4) {
-        const extremum = extremaBuffer.slice(i, (i + 4))
+      const rawExtrema = []
+      const refinedExtrema = []
+      for (let i = 0; i < rawExtremaBuffer.length; i += 4) {
+        const extremum = rawExtremaBuffer.slice(i, (i + 4))
         if (extremum[0] > 0 && extremum[1] > 0) {
           totalExtrema++
-          extrema.push(extremum)
+          rawExtrema.push(extremum)
+          let refinedExtremum = refinedExtremaBuffer.slice(i, (i + 4))
+          if (refinedExtremum[0] > 0) {
+            const mip = refinedExtremum[3]
+            const mipFactor = 2 ** mip
+            const globalXY = refinedExtremum.slice(0, 2).map(v => v * mipFactor)
+            const sizeFactor = allocatedShader.wasDoubled ? mipFactor * 2 : mipFactor
+            const size = sigma * (2 ** (refinedExtremum[2] / (gaussians.length - 2))) * sizeFactor
+            refinedExtrema.push(refinedExtremum)
+            const globalPosExtremum = {x: globalXY[0], y: globalXY[1], size}
+            if (i < 400 || i > 4000) {
+              console.log('raw extremum', [...extremum], 'refinedExtremum', [...refinedExtremum], 'global', globalPosExtremum)
+              console.log(kdTree.findNN({x: extremum[0], y: extremum[1], idx: extremum[2], octave: extremum[3]}))
+            }
+          }
         }
       }
 
       console.log('totalExtrema', totalExtrema)
-      console.log('extrema', extrema)
-      const pysiftKeypoints = await (await fetch('pysift_ref/raw_keypoints.json')).json()
-      console.log('pysift_ref', pysiftKeypoints)
+      console.log('rawExtrema', rawExtrema)
+      console.log('refinedExtrema', refinedExtrema)
+
       const textureName = 'diffTexture'
       const texture = allocatedShader[textureName]
       const contexts = []
@@ -207,15 +237,15 @@ export async function testGaussianBlurShader (device) {
         return pointSet
       }
 
-      for (const extremum of extrema) {
-        let pointSet = getSets(`${extremum[3]}|${extremum[2]}`)
+      for (const extremum of rawExtrema) {
+        let pointSet = getSets(`${Math.round(extremum[3])}|${Math.round(extremum[2])}`)
         pointSet.computed.add(`${extremum[0]}|${extremum[1]}|${extremum[3]}|${extremum[2]}`)
         const ctx = contexts[Math.round(extremum[3])][Math.round(extremum[2])]
         ctx.beginPath()
         ctx.arc(extremum[0] + 0.5, extremum[1] + 0.5, 2, 0, 2 * Math.PI)
         ctx.fill()
       }
-      for (const pyExtremum of pysiftKeypoints) {
+      for (const pyExtremum of pysiftRawKeypoints) {
         let pointSet = getSets(`${pyExtremum.octave}|${pyExtremum.idx}`)
         pointSet.expected.add(`${pyExtremum.x}|${pyExtremum.y}|${pyExtremum.octave}|${pyExtremum.idx}`)
         const ctx = contexts[pyExtremum.octave][pyExtremum.idx]
@@ -370,8 +400,8 @@ export async function testGaussianBlurShader (device) {
       allocatedShader = await ts.createGPUResources(workgroupSize, testImage, testImage.width, testImage.height, gs)
       try {
         outputImage = await allocatedShader.runShader()
-        const index = 3
-        const mipLevel = 4
+        const index = 0
+        const mipLevel = 0
         await assert.imageTest(testImage, await allocatedShader.getTexture('outputTexture', mipLevel, index), `Complete blur on big image stack index: ${index}, mip level: ${mipLevel}`, true)
         if (false) {
           for (let mipLevel = 0; mipLevel < 8; mipLevel++) {
